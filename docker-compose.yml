@@ -1,0 +1,29 @@
+# ORC — local-first operator console
+# Quick start: docker compose up --build
+
+services:
+  orc:
+    build: .
+    container_name: orc
+    ports:
+      - "127.0.0.1:8100:8100"
+    env_file:
+      - .env
+    volumes:
+      # Persist operator state across container rebuilds
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./bridge/builder_jobs:/app/bridge/builder_jobs
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8100/api/health',timeout=3).status==200 else 1)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
