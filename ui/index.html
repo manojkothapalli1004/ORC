@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Control Tower</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="shell">
+        <aside class="sidebar">
+            <div class="brand">
+                <div class="brand-mark">◈</div>
+                <div>
+                    <div class="brand-title">Control Tower</div>
+                    <div class="brand-subtitle">Premium operator console</div>
+                </div>
+            </div>
+
+            <nav class="nav" id="nav"></nav>
+
+            <section class="sidebar-section">
+                <div class="sidebar-label">Operator status</div>
+                <div class="operator-stack" id="operator-stack"></div>
+            </section>
+        </aside>
+
+        <div class="app-frame">
+            <header class="topbar">
+                <div>
+                    <div class="eyebrow">Orchestrator control tower</div>
+                    <h1 id="page-title">System overview</h1>
+                </div>
+                <div class="topbar-meta">
+                    <div class="status-pill" id="api-status">
+                        <span class="dot loading"></span>
+                        <span class="label">connecting</span>
+                    </div>
+                    <div class="meta-chip">Dark mode</div>
+                    <div class="meta-chip">Read only</div>
+                </div>
+            </header>
+
+            <main class="content">
+                <section class="hero-card">
+                    <div>
+                        <div class="hero-kicker">Operator-ready</div>
+                        <h2>High-signal visibility for orchestration without live controls.</h2>
+                        <p>Preview the control tower shell with workflow, proposal, approval, experiment, and provider views powered by backend read-only data when available and premium mock-safe fallback when it is not.</p>
+                    </div>
+                    <div class="hero-actions">
+                        <label class="mode-picker" for="workflow-mode-select">
+                            <span class="sidebar-label">Workflow mode</span>
+                            <select id="workflow-mode-select" class="mode-select">
+                                <option value="compact">Compact</option>
+                                <option value="normal" selected>Normal</option>
+                                <option value="rich">Rich</option>
+                                <option value="go_wild">Go Wild</option>
+                            </select>
+                        </label>
+                        <button class="btn btn-primary" type="button" id="btn-create-demo">Create demo workflow</button>
+                        <button class="btn" type="button" id="btn-run-demo">Run selected demo</button>
+                    </div>
+                    <div class="hero-mode-summary" id="hero-mode-summary"></div>
+                </section>
+
+                <div class="section-grid" id="page-content"></div>
+            </main>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
