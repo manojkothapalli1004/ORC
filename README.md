@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.png" alt="ORC logo" width="160" />
+  <img src="https://raw.githubusercontent.com/manojkothapalli1004/orc/main/docs/logo.png" alt="ORC logo" width="160" />
 </p>
 
 <h1 align="center">ORC</h1>
