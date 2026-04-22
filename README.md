@@ -9,6 +9,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/manojkothapalli1004/orc/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/manojkothapalli1004/orc/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-blue.svg"></a>
   <img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-blue.svg">
   <img alt="Status: V1" src="https://img.shields.io/badge/status-V1-green.svg">
@@ -22,11 +23,23 @@ It is designed as a serious operator console, not an autonomous agent runtime. V
 
 ## Install
 
+### Option A — local (`uv`)
+
 ```bash
 git clone git@github.com:manojkothapalli1004/orc.git
 cd orc
+cp .env.example .env
 uv sync
-uv pip install -e .      # registers the `ORC` CLI
+uv pip install -e .      # registers the `orc` CLI
+```
+
+### Option B — Docker
+
+```bash
+git clone git@github.com:manojkothapalli1004/orc.git
+cd orc
+cp .env.example .env
+docker compose up --build
 ```
 
 ## Run
