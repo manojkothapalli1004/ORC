@@ -1,0 +1,83 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage/
+htmlcov/
+
+# Virtualenvs
+.venv/
+venv/
+
+# Local env and secrets
+.env
+.env.local
+.env.*
+!.env.example
+
+# Python packaging / local tool state
+.python-version
+*.sqlite3
+*.db
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Runtime state — NEVER COMMIT (private operational data)
+logs/
+*.log
+data/
+bridge/builder_jobs/
+
+# Ad-hoc dev patch scripts (not part of the shipped product)
+patch_*.py
+patch_*.js
+fix_*.js
+
+# Backups
+*.old.bak
+
+# Python caches inside source tree
+**/__pycache__/
+**/*.py[cod]
+
+# Local package metadata
+orchestrator.egg-info/
+
+# Keep placeholder directories only
+!logs/.gitkeep
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+*.swp
+*.swo
+~$*
+
+# Notebook / frontend caches if added later
+.ipynb_checkpoints/
+node_modules/
+.pnpm-store/
+.npm/
+.yarn/
+
+# Local screenshots / exports
+screenshots/
+artifacts/
+exports/
+docs/_site/
+.github/.cache/

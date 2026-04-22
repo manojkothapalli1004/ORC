@@ -1,0 +1,27 @@
+[project]
+name = "orchestrator"
+version = "0.1.0"
+description = "Local-first orchestration control tower for workflows, builder jobs, sessions, ideas, and deterministic next-step planning"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "openai>=1.60.0",
+    "anthropic>=0.42.0",
+    "google-genai>=1.20.0",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.7.0",
+    "python-dotenv>=1.0.0",
+    "mcp>=1.27.0",
+]
+
+[project.scripts]
+orc = "backend.cli.main:main"
+
+[tool.setuptools.packages.find]
+include = ["backend*"]
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
