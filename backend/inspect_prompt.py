@@ -3,7 +3,7 @@
 Usage:
     python3 -m backend.inspect_prompt --role builder --mode compact
     python3 -m backend.inspect_prompt --preset builder_parallel --format json
-    python3 -m backend.inspect_prompt --role reviewer --mode rich --var scope=orchestrator/ --var workspace_root=/Users/pradeep/calwbot
+    python3 -m backend.inspect_prompt --role reviewer --mode rich --var scope=orchestrator/ --var workspace_root=<your-workspace-root>
     python3 -m backend.inspect_prompt --list-presets
     python3 -m backend.inspect_prompt --list-templates
 """

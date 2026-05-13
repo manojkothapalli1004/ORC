@@ -13,7 +13,7 @@ ORC is pre-1.0. Only the latest `main` branch receives security updates.
 
 **Do not open a public GitHub issue for security vulnerabilities.**
 
-Please email **manojkothapalli1@gmail.com** with:
+Please open a [GitHub private security advisory](https://github.com/manojkothapalli1004/orc/security/advisories/new) with:
 
 - A clear description of the vulnerability
 - Steps to reproduce (minimal reproduction preferred)
