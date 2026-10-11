@@ -5,6 +5,8 @@ const sections = [
     { id: 'sessions', label: 'Sessions' },
     { id: 'ideas', label: 'Ideas' },
     { id: 'assistant', label: 'Assistant Brain' },
+    { id: 'search', label: 'Search' },
+    { id: 'scheduler', label: 'Scheduler' },
     { id: 'handoff', label: 'Handoff' },
     { id: 'proposals', label: 'Proposals' },
     { id: 'approvals', label: 'Approvals' },
@@ -1229,6 +1231,8 @@ function renderPage(sectionId = state.activeSection) {
         sessions: renderSessions(dataset),
         ideas: renderIdeas(dataset),
         assistant: renderAssistant(dataset),
+        search: renderSearch(),
+        scheduler: renderScheduler(),
         handoff: renderHandoff(),
         proposals: renderProposals(dataset),
         approvals: renderApprovals(dataset),
@@ -1825,6 +1829,7 @@ function bindPostRenderInteractions() {
     bindWorkflowModeChange();
     bindNavWorkflowLinks();
     bindIdeaActions();
+    if (state.activeSection === 'search' && typeof bindSearchHandlers === 'function') bindSearchHandlers();
 }
 
 renderPage('overview');
@@ -2617,4 +2622,444 @@ function renderHandoff() {
             ${promptsHtml}
         </div>
     `;
+}
+
+// --- SEARCH ---
+
+const searchState = {
+    query: '',
+    kinds: '',          // '' = all
+    hits: [],
+    total: 0,
+    loading: false,
+    error: '',
+    reindexing: false,
+    reindexResult: null,
+};
+
+const SEARCH_KIND_LABELS = {
+    session: 'Session',
+    idea: 'Idea',
+    prompt_template: 'Prompt template',
+    workflow: 'Workflow',
+    memory_section: 'Memory section',
+};
+
+function renderSearch() {
+    const q = escapeHtml(searchState.query);
+    const kindOpts = [
+        { v: '', label: 'All' },
+        { v: 'session', label: 'Sessions' },
+        { v: 'idea', label: 'Ideas' },
+        { v: 'prompt_template', label: 'Prompt templates' },
+        { v: 'workflow', label: 'Workflows' },
+    ].map(o => `<option value="${o.v}" ${o.v === searchState.kinds ? 'selected' : ''}>${o.label}</option>`).join('');
+
+    let resultsHtml;
+    if (searchState.loading) {
+        resultsHtml = '<div class="empty-state">Searching…</div>';
+    } else if (searchState.error) {
+        resultsHtml = `<div class="empty-state">Error: ${escapeHtml(searchState.error)}</div>`;
+    } else if (!searchState.query.trim()) {
+        resultsHtml = '<div class="empty-state">Type a query above and press Search. FTS5 supports prefix search on the last term.</div>';
+    } else if (!searchState.hits.length) {
+        resultsHtml = '<div class="empty-state">No matches.</div>';
+    } else {
+        resultsHtml = searchState.hits.map(hit => `
+            <article class="card" style="margin-bottom:var(--space-2);">
+                <div class="card-header">
+                    <div>
+                        <div class="card-title">${escapeHtml(hit.title || hit.doc_id)}</div>
+                        <div style="font-size:11px; opacity:0.6; margin-top:4px;">
+                            <span class="status-badge">${SEARCH_KIND_LABELS[hit.kind] || hit.kind}</span>
+                            <span style="margin-left:8px; font-family:monospace;">${escapeHtml(hit.doc_id)}</span>
+                            <span style="margin-left:8px;">${formatRelative(hit.updated_at)}</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="card-body" style="font-size:13px; line-height:1.5;">
+                    ${hit.excerpt || '<em>(no excerpt)</em>'}
+                </div>
+            </article>
+        `).join('');
+    }
+
+    const reindexBadge = searchState.reindexResult
+        ? `<span style="font-size:11px; opacity:0.6; margin-left:8px;">last reindex: ${searchState.reindexResult.total} docs</span>`
+        : '';
+
+    return `
+        <div style="max-width:900px;">
+            <div style="margin-bottom:var(--space-4);">
+                <div class="eyebrow">Local full-text search (FTS5)</div>
+                <p style="font-size:13px; opacity:0.6; margin:var(--space-1) 0 0 0;">
+                    Search across local sessions, ideas, prompt templates, and workflows.
+                </p>
+            </div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:var(--space-3); padding:var(--space-2); background:var(--bg-1); border-radius:var(--radius); border:1px solid var(--border-color);">
+                <input id="search-q" type="text" placeholder="Search local state…" value="${q}"
+                    style="flex:1; min-width:240px; padding:6px 10px; border:1px solid var(--border-color); border-radius:var(--radius); background:var(--bg-0); color:var(--text-1); font-size:13px;" />
+                <select id="search-kind" style="padding:6px 8px; border:1px solid var(--border-color); border-radius:var(--radius); background:var(--bg-0); color:var(--text-1); font-size:12px;">
+                    ${kindOpts}
+                </select>
+                <button id="search-go" class="btn btn-primary" type="button">Search</button>
+                <button id="search-reindex" class="btn" type="button" ${searchState.reindexing ? 'disabled' : ''}>
+                    ${searchState.reindexing ? 'Reindexing…' : 'Reindex'}
+                </button>
+                ${reindexBadge}
+            </div>
+            <div style="font-size:11px; opacity:0.5; margin-bottom:var(--space-2);">
+                ${searchState.total} hit${searchState.total === 1 ? '' : 's'}
+            </div>
+            ${resultsHtml}
+        </div>
+    `;
+}
+
+async function runSearch() {
+    if (state.apiMode !== 'online') {
+        searchState.error = 'Backend offline.';
+        renderPage('search');
+        return;
+    }
+    const q = (document.getElementById('search-q')?.value || '').trim();
+    const kind = document.getElementById('search-kind')?.value || '';
+    searchState.query = q;
+    searchState.kinds = kind;
+    searchState.error = '';
+    if (!q) {
+        searchState.hits = [];
+        searchState.total = 0;
+        renderPage('search');
+        return;
+    }
+    searchState.loading = true;
+    renderPage('search');
+    try {
+        const params = new URLSearchParams({ q, limit: '30' });
+        if (kind) params.set('kind', kind);
+        const result = await fetchJson(`/api/search?${params.toString()}`);
+        searchState.hits = result.hits || [];
+        searchState.total = result.total || 0;
+    } catch (e) {
+        searchState.error = String(e.message || e);
+        searchState.hits = [];
+        searchState.total = 0;
+    } finally {
+        searchState.loading = false;
+        renderPage('search');
+    }
+}
+
+async function reindexSearch() {
+    if (state.apiMode !== 'online') return;
+    searchState.reindexing = true;
+    renderPage('search');
+    try {
+        const r = await postJson('/api/search/reindex', {});
+        searchState.reindexResult = r;
+    } catch (e) {
+        searchState.error = `reindex failed: ${e.message || e}`;
+    } finally {
+        searchState.reindexing = false;
+        renderPage('search');
+    }
+}
+
+function bindSearchHandlers() {
+    const go = document.getElementById('search-go');
+    const ri = document.getElementById('search-reindex');
+    const q = document.getElementById('search-q');
+    if (go) go.addEventListener('click', runSearch);
+    if (ri) ri.addEventListener('click', reindexSearch);
+    if (q) {
+        q.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); runSearch(); }
+        });
+        q.focus();
+    }
+}
+
+// --- SCHEDULER ---
+
+const schedulerState = {
+    jobs: [],
+    loaded: false,
+    loading: false,
+    error: '',
+    actionId: '',
+    runs: {},   // jobId -> [runs]
+    expandedRuns: '',
+    draft: {
+        name: '',
+        cron: '0 9 * * *',
+        action_type: 'fire_saved_prompt',
+        prompt_id: '',
+        section: '',
+        note: '',
+        workflow_id: '',
+    },
+    savedPrompts: [],
+};
+
+const ACTION_TYPES = [
+    { v: 'fire_saved_prompt', label: 'Fire saved prompt (renders body to scheduler_runs/)' },
+    { v: 'record_memory_note', label: 'Append note to canonical memory section' },
+    { v: 'run_workflow_step', label: 'Run a workflow step' },
+];
+
+function renderScheduler() {
+    const d = schedulerState.draft;
+    const promptOptions = ['<option value="">— pick a saved prompt —</option>']
+        .concat(schedulerState.savedPrompts.map(p =>
+            `<option value="${escapeHtml(p.id)}" ${p.id === d.prompt_id ? 'selected' : ''}>${escapeHtml(p.name || p.id)}</option>`
+        )).join('');
+    const actionOptions = ACTION_TYPES.map(a =>
+        `<option value="${a.v}" ${a.v === d.action_type ? 'selected' : ''}>${a.label}</option>`
+    ).join('');
+
+    let actionFields = '';
+    if (d.action_type === 'fire_saved_prompt') {
+        actionFields = `
+            <label style="display:block; font-size:11px; opacity:0.7; margin-top:8px;">Saved prompt</label>
+            <select id="sched-prompt-id" style="width:100%; padding:6px 8px; border:1px solid var(--border-color); border-radius:var(--radius); background:var(--bg-0); color:var(--text-1); font-size:12px;">
+                ${promptOptions}
+            </select>
+        `;
+    } else if (d.action_type === 'record_memory_note') {
+        actionFields = `
+            <label style="display:block; font-size:11px; opacity:0.7; margin-top:8px;">Memory section</label>
+            <input id="sched-section" type="text" value="${escapeHtml(d.section)}" placeholder="status, decisions, …"
+                style="width:100%; padding:6px 8px; border:1px solid var(--border-color); border-radius:var(--radius); background:var(--bg-0); color:var(--text-1); font-size:12px;" />
+            <label style="display:block; font-size:11px; opacity:0.7; margin-top:8px;">Note body</label>
+            <textarea id="sched-note" rows="3" placeholder="Note text appended on each fire."
+                style="width:100%; padding:6px 8px; border:1px solid var(--border-color); border-radius:var(--radius); background:var(--bg-0); color:var(--text-1); font-size:12px; font-family:inherit;">${escapeHtml(d.note)}</textarea>
+        `;
+    } else if (d.action_type === 'run_workflow_step') {
+        actionFields = `
+            <label style="display:block; font-size:11px; opacity:0.7; margin-top:8px;">Workflow ID</label>
+            <input id="sched-workflow-id" type="text" value="${escapeHtml(d.workflow_id)}" placeholder="12-char hex id"
+                style="width:100%; padding:6px 8px; border:1px solid var(--border-color); border-radius:var(--radius); background:var(--bg-0); color:var(--text-1); font-size:12px;" />
+        `;
+    }
+
+    const createForm = `
+        <section class="card" style="margin-bottom:var(--space-4);">
+            <div class="card-header"><div class="card-title">New scheduled job</div></div>
+            <div class="card-body">
+                <label style="display:block; font-size:11px; opacity:0.7;">Name</label>
+                <input id="sched-name" type="text" value="${escapeHtml(d.name)}" placeholder="e.g. Daily 9am brief"
+                    style="width:100%; padding:6px 8px; border:1px solid var(--border-color); border-radius:var(--radius); background:var(--bg-0); color:var(--text-1); font-size:12px;" />
+                <label style="display:block; font-size:11px; opacity:0.7; margin-top:8px;">Cron expression (5-field, local time)</label>
+                <input id="sched-cron" type="text" value="${escapeHtml(d.cron)}" placeholder="0 9 * * *"
+                    style="width:100%; padding:6px 8px; border:1px solid var(--border-color); border-radius:var(--radius); background:var(--bg-0); color:var(--text-1); font-size:12px; font-family:monospace;" />
+                <label style="display:block; font-size:11px; opacity:0.7; margin-top:8px;">Action</label>
+                <select id="sched-action-type" style="width:100%; padding:6px 8px; border:1px solid var(--border-color); border-radius:var(--radius); background:var(--bg-0); color:var(--text-1); font-size:12px;">
+                    ${actionOptions}
+                </select>
+                ${actionFields}
+                <div style="margin-top:12px;">
+                    <button id="sched-create" class="btn btn-primary" type="button">Create job</button>
+                    ${schedulerState.error ? `<span style="margin-left:12px; color:var(--text-warning, #c66); font-size:12px;">${escapeHtml(schedulerState.error)}</span>` : ''}
+                </div>
+            </div>
+        </section>
+    `;
+
+    let jobsHtml;
+    if (!schedulerState.loaded && !schedulerState.loading) {
+        jobsHtml = '<div class="empty-state">Loading jobs…</div>';
+        setTimeout(loadScheduler, 0);
+    } else if (schedulerState.loading) {
+        jobsHtml = '<div class="empty-state">Loading…</div>';
+    } else if (!schedulerState.jobs.length) {
+        jobsHtml = '<div class="empty-state">No scheduled jobs yet.</div>';
+    } else {
+        jobsHtml = schedulerState.jobs.map(j => {
+            const runs = schedulerState.runs[j.id] || [];
+            const expanded = schedulerState.expandedRuns === j.id;
+            const lastBadge = j.last_status
+                ? `<span class="status-badge status-${j.last_status}" style="margin-left:8px;">${j.last_status}</span>`
+                : '';
+            const enabledLabel = j.enabled ? 'Disable' : 'Enable';
+            const runRows = expanded
+                ? (runs.length
+                    ? runs.map(r => `<tr>
+                        <td style="font-family:monospace; font-size:11px;">${escapeHtml(r.fired_at || '')}</td>
+                        <td><span class="status-badge status-${r.status}">${r.status}</span></td>
+                        <td style="font-size:11px; opacity:0.8;">${escapeHtml((r.output || '').slice(0, 240))}</td>
+                    </tr>`).join('')
+                    : '<tr><td colspan="3" style="font-size:11px; opacity:0.5;">No runs yet.</td></tr>')
+                : '';
+            return `
+                <article class="card" style="margin-bottom:var(--space-2);">
+                    <div class="card-header">
+                        <div>
+                            <div class="card-title">${escapeHtml(j.name || j.id)} ${lastBadge}</div>
+                            <div style="font-size:11px; opacity:0.6; margin-top:4px;">
+                                <span style="font-family:monospace;">${escapeHtml(j.cron)}</span>
+                                <span style="margin-left:8px;">action: ${escapeHtml(j.action_type)}</span>
+                                ${j.next_run_at ? `<span style="margin-left:8px;">next: ${formatRelative(j.next_run_at)}</span>` : ''}
+                                ${j.last_run_at ? `<span style="margin-left:8px;">last: ${formatRelative(j.last_run_at)}</span>` : ''}
+                                <span style="margin-left:8px;">${j.enabled ? '✓ enabled' : '✗ disabled'}</span>
+                            </div>
+                        </div>
+                        <div class="card-actions">
+                            <button class="btn" data-sched-run="${escapeHtml(j.id)}" ${schedulerState.actionId === j.id ? 'disabled' : ''}>Run now</button>
+                            <button class="btn" data-sched-toggle="${escapeHtml(j.id)}" data-current-enabled="${j.enabled ? '1' : '0'}">${enabledLabel}</button>
+                            <button class="btn" data-sched-runs="${escapeHtml(j.id)}">${expanded ? 'Hide runs' : 'Show runs'}</button>
+                            <button class="btn" data-sched-delete="${escapeHtml(j.id)}">Delete</button>
+                        </div>
+                    </div>
+                    ${expanded ? `
+                        <div class="card-body" style="overflow-x:auto;">
+                            <table style="width:100%; font-size:12px; border-collapse:collapse;">
+                                <thead><tr><th style="text-align:left; opacity:0.6; padding:4px;">fired_at</th><th style="text-align:left; opacity:0.6; padding:4px;">status</th><th style="text-align:left; opacity:0.6; padding:4px;">output</th></tr></thead>
+                                <tbody>${runRows}</tbody>
+                            </table>
+                        </div>
+                    ` : ''}
+                </article>
+            `;
+        }).join('');
+    }
+
+    setTimeout(bindSchedulerHandlers, 0);
+
+    return `
+        <div style="max-width:1000px;">
+            <div style="margin-bottom:var(--space-4);">
+                <div class="eyebrow">Local cron scheduler</div>
+                <p style="font-size:13px; opacity:0.6; margin:var(--space-1) 0 0 0;">
+                    Fire saved prompts, record memory notes, or step workflows on a cron schedule. No shell, no external network.
+                </p>
+            </div>
+            ${createForm}
+            <h3 style="margin-bottom:var(--space-2);">Scheduled jobs</h3>
+            ${jobsHtml}
+        </div>
+    `;
+}
+
+async function loadScheduler() {
+    if (state.apiMode !== 'online') return;
+    schedulerState.loading = true;
+    try {
+        const list = await fetchJson('/api/scheduler/jobs');
+        schedulerState.jobs = list.jobs || [];
+        // Preload saved prompts for the dropdown
+        try {
+            const prompts = await fetchJson('/api/assistant/saved-prompts?sort=newest');
+            schedulerState.savedPrompts = prompts.prompts || [];
+        } catch { schedulerState.savedPrompts = []; }
+    } catch (e) {
+        schedulerState.error = String(e.message || e);
+    } finally {
+        schedulerState.loaded = true;
+        schedulerState.loading = false;
+        renderPage('scheduler');
+    }
+}
+
+function bindSchedulerHandlers() {
+    const collect = () => {
+        const d = schedulerState.draft;
+        d.name = document.getElementById('sched-name')?.value || '';
+        d.cron = document.getElementById('sched-cron')?.value || '';
+        d.action_type = document.getElementById('sched-action-type')?.value || d.action_type;
+        d.prompt_id = document.getElementById('sched-prompt-id')?.value || '';
+        d.section = document.getElementById('sched-section')?.value || '';
+        d.note = document.getElementById('sched-note')?.value || '';
+        d.workflow_id = document.getElementById('sched-workflow-id')?.value || '';
+    };
+
+    const at = document.getElementById('sched-action-type');
+    if (at) at.addEventListener('change', () => { collect(); renderPage('scheduler'); });
+
+    const create = document.getElementById('sched-create');
+    if (create) create.addEventListener('click', async () => {
+        collect();
+        const d = schedulerState.draft;
+        const payload = {
+            name: d.name.trim(),
+            cron: d.cron.trim(),
+            action_type: d.action_type,
+            action_payload: {},
+        };
+        if (d.action_type === 'fire_saved_prompt') payload.action_payload = { prompt_id: d.prompt_id };
+        else if (d.action_type === 'record_memory_note') payload.action_payload = { section: d.section, note: d.note };
+        else if (d.action_type === 'run_workflow_step') payload.action_payload = { workflow_id: d.workflow_id };
+        if (!payload.name || !payload.cron) {
+            schedulerState.error = 'Name and cron expression are required.';
+            renderPage('scheduler');
+            return;
+        }
+        schedulerState.error = '';
+        try {
+            await postJson('/api/scheduler/jobs', payload);
+            schedulerState.draft = { name: '', cron: '0 9 * * *', action_type: 'fire_saved_prompt', prompt_id: '', section: '', note: '', workflow_id: '' };
+            await loadScheduler();
+        } catch (e) {
+            schedulerState.error = String(e.message || e);
+            renderPage('scheduler');
+        }
+    });
+
+    document.querySelectorAll('[data-sched-run]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const id = btn.dataset.schedRun;
+            schedulerState.actionId = id;
+            renderPage('scheduler');
+            try {
+                await postJson(`/api/scheduler/jobs/${encodeURIComponent(id)}/run-now`, {});
+                await loadScheduler();
+            } finally {
+                schedulerState.actionId = '';
+            }
+        });
+    });
+    document.querySelectorAll('[data-sched-toggle]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const id = btn.dataset.schedToggle;
+            const enabled = btn.dataset.currentEnabled === '1';
+            try {
+                await postJson(`/api/scheduler/jobs/${encodeURIComponent(id)}`, { enabled: !enabled }, 'PATCH');
+                await loadScheduler();
+            } catch (e) {
+                schedulerState.error = String(e.message || e);
+                renderPage('scheduler');
+            }
+        });
+    });
+    document.querySelectorAll('[data-sched-delete]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const id = btn.dataset.schedDelete;
+            if (!confirm('Delete this scheduled job?')) return;
+            try {
+                await fetch(`/api/scheduler/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' });
+                await loadScheduler();
+            } catch (e) {
+                schedulerState.error = String(e.message || e);
+                renderPage('scheduler');
+            }
+        });
+    });
+    document.querySelectorAll('[data-sched-runs]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const id = btn.dataset.schedRuns;
+            if (schedulerState.expandedRuns === id) {
+                schedulerState.expandedRuns = '';
+                renderPage('scheduler');
+                return;
+            }
+            schedulerState.expandedRuns = id;
+            try {
+                const r = await fetchJson(`/api/scheduler/jobs/${encodeURIComponent(id)}/runs`);
+                schedulerState.runs[id] = r.runs || [];
+            } catch {
+                schedulerState.runs[id] = [];
+            }
+            renderPage('scheduler');
+        });
+    });
 }

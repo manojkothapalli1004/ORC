@@ -15,6 +15,29 @@ from backend.models.idea import (
     IdeaThreadStatus,
     ProposalDraft,
 )
+from backend.storage.search_index import get_search_index
+
+
+def _index_idea(thread: IdeaThread) -> None:
+    parts: list[str] = [thread.title or ""]
+    for msg in thread.messages:
+        if msg.body:
+            parts.append(msg.body)
+    if thread.summary:
+        parts.append(thread.summary.problem or "")
+        parts.append(thread.summary.desired_outcome or "")
+        parts.append(thread.summary.notes or "")
+        parts.extend(thread.summary.constraints)
+    if thread.proposal_draft:
+        parts.append(thread.proposal_draft.title or "")
+        parts.append(thread.proposal_draft.prompt or "")
+        parts.append(thread.proposal_draft.rationale or "")
+    title = thread.title or f"idea {thread.id}"
+    body = "\n".join(p for p in parts if p)
+    try:
+        get_search_index().upsert("idea", thread.id, title, body, thread.updated_at)
+    except Exception:
+        pass
 
 
 class IdeaStore:
@@ -44,6 +67,7 @@ class IdeaStore:
         tmp = self._path(thread.id).with_suffix('.tmp')
         tmp.write_text(thread.model_dump_json(indent=2))
         tmp.rename(self._path(thread.id))
+        _index_idea(thread)
         return thread
 
     def load(self, idea_id: str) -> IdeaThread | None:

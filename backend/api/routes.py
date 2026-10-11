@@ -1454,3 +1454,134 @@ async def get_linkable_objects():
         for s in session_store.list_sessions()
     ]
     return {"workflows": workflows, "sessions": sessions}
+
+
+# ── Full-text search across local state ────────────────────────────────────
+from backend.storage.search_index import KINDS as _SEARCH_KINDS, get_search_index, rebuild_from_disk
+
+
+@router.get("/search")
+async def search_state(q: str = "", kind: str = "", limit: int = 20):
+    """Full-text search over sessions, ideas, prompt templates, and workflows.
+
+    `kind` is an optional comma-separated filter; pass any of:
+    session, idea, prompt_template, workflow.
+    """
+    if not q.strip():
+        return {"query": q, "hits": [], "total": 0}
+    kinds: list[str] | None = None
+    if kind.strip():
+        kinds = [k.strip() for k in kind.split(",") if k.strip() in _SEARCH_KINDS]
+    limit = max(1, min(int(limit or 20), 100))
+    hits = get_search_index().search(q, kinds=kinds, limit=limit)
+    return {"query": q, "hits": hits, "total": len(hits)}
+
+
+@router.post("/search/reindex")
+async def reindex_search():
+    """Drop and rebuild the search index from JSON state on disk."""
+    counts = rebuild_from_disk()
+    return {"reindexed": counts, "total": sum(counts.values())}
+
+
+# ── Local cron scheduler ──────────────────────────────────────────────────
+from backend.models.scheduler import (
+    CreateScheduledJobRequest,
+    ScheduledJob,
+    UpdateScheduledJobRequest,
+)
+from backend.services.scheduler import get_scheduler, parse_cron
+
+
+def _job_payload(job: ScheduledJob) -> dict:
+    return {
+        "id": job.id,
+        "name": job.name,
+        "cron": job.cron,
+        "action_type": job.action_type.value,
+        "action_payload": job.action_payload,
+        "enabled": job.enabled,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+        "last_run_at": job.last_run_at.isoformat() if job.last_run_at else None,
+        "last_status": job.last_status,
+        "last_output": job.last_output,
+        "next_run_at": job.next_run_at.isoformat() if job.next_run_at else None,
+    }
+
+
+@router.get("/scheduler/jobs")
+async def list_scheduled_jobs():
+    sched = get_scheduler()
+    return {"jobs": [_job_payload(j) for j in sched.list_jobs()]}
+
+
+@router.post("/scheduler/jobs")
+async def create_scheduled_job(request: CreateScheduledJobRequest):
+    try:
+        parse_cron(request.cron)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid cron expression: {exc}")
+    job = ScheduledJob(
+        name=request.name,
+        cron=request.cron,
+        action_type=request.action_type,
+        action_payload=request.action_payload,
+        enabled=request.enabled,
+    )
+    saved = get_scheduler().create(job)
+    return _job_payload(saved)
+
+
+@router.patch("/scheduler/jobs/{job_id}")
+async def update_scheduled_job(job_id: str, request: UpdateScheduledJobRequest):
+    try:
+        updated = get_scheduler().update(
+            job_id,
+            name=request.name,
+            cron=request.cron,
+            enabled=request.enabled,
+            action_payload=request.action_payload,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid cron expression: {exc}")
+    if updated is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return _job_payload(updated)
+
+
+@router.delete("/scheduler/jobs/{job_id}")
+async def delete_scheduled_job(job_id: str):
+    ok = get_scheduler().delete(job_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="job not found")
+    return {"deleted": True, "job_id": job_id}
+
+
+@router.post("/scheduler/jobs/{job_id}/run-now")
+async def run_scheduled_job_now(job_id: str):
+    run = get_scheduler().run_now(job_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return {
+        "job_id": run.job_id,
+        "fired_at": run.fired_at.isoformat(),
+        "status": run.status,
+        "output": run.output,
+    }
+
+
+@router.get("/scheduler/jobs/{job_id}/runs")
+async def list_scheduled_runs(job_id: str):
+    runs = get_scheduler().list_runs(job_id)
+    return {
+        "runs": [
+            {
+                "job_id": r.job_id,
+                "fired_at": r.fired_at.isoformat(),
+                "status": r.status,
+                "output": r.output,
+            }
+            for r in runs
+        ]
+    }

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from backend.config import settings
 from backend.models.prompt import PromptRole, PromptTemplate, PromptTemplateCategory
+from backend.storage.search_index import get_search_index
 
 
 _DEFAULT_TEMPLATES = [
@@ -209,6 +210,20 @@ _DEFAULT_TEMPLATES = [
 ]
 
 
+def _index_template(template: PromptTemplate) -> None:
+    title = template.name or template.id
+    body_parts = [template.body or ""]
+    if template.variables:
+        body_parts.append("variables: " + ", ".join(template.variables))
+    body = "\n".join(p for p in body_parts if p)
+    try:
+        get_search_index().upsert(
+            "prompt_template", template.id, title, body, template.updated_at
+        )
+    except Exception:
+        pass
+
+
 class PromptTemplateStore:
     def __init__(self, root_dir: Path | None = None) -> None:
         self._dir = root_dir or settings.prompt_template_dir
@@ -253,6 +268,7 @@ class PromptTemplateStore:
         tmp = self._path(template.id).with_suffix('.tmp')
         tmp.write_text(template.model_dump_json(indent=2))
         tmp.rename(self._path(template.id))
+        _index_template(template)
         return template
 
     def by_category(self, category: PromptTemplateCategory) -> list[PromptTemplate]:

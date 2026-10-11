@@ -9,6 +9,7 @@ from pathlib import Path
 
 from backend.config import settings
 from backend.models.core import WorkflowState
+from backend.storage.search_index import get_search_index
 
 logger = logging.getLogger("orchestrator.storage")
 
@@ -44,6 +45,7 @@ class StateStore:
         tmp = self._path(state.id).with_suffix(".tmp")
         tmp.write_text(state.model_dump_json(indent=2))
         tmp.rename(self._path(state.id))
+        _index_workflow(state)
 
     def list_ids(self) -> list[str]:
         # Workflow IDs are 12-char hex (see `create()`); filter out co-located
@@ -58,5 +60,32 @@ class StateStore:
         p = self._path(workflow_id)
         if p.exists():
             p.unlink()
+            try:
+                get_search_index().delete("workflow", workflow_id)
+            except Exception:
+                pass
             return True
         return False
+
+
+def _index_workflow(state: WorkflowState) -> None:
+    parts: list[str] = [state.id, state.status.value, state.current_stage or ""]
+    if state.summary:
+        parts.append(state.summary.title or "")
+        parts.append(state.summary.outcome or "")
+        parts.extend(state.summary.files_changed)
+    for prop in state.proposals:
+        if prop.prompt:
+            parts.append(prop.prompt)
+        if prop.response:
+            parts.append(prop.response)
+        if prop.reviewer_notes:
+            parts.append(prop.reviewer_notes)
+    if state.error:
+        parts.append(state.error)
+    title = (state.summary.title if state.summary and state.summary.title else f"workflow {state.id}")
+    body = "\n".join(p for p in parts if p)
+    try:
+        get_search_index().upsert("workflow", state.id, title, body, state.updated_at)
+    except Exception:
+        pass

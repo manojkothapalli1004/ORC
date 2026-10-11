@@ -759,6 +759,30 @@ def get_project_status() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# SEARCH
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def search(query: str, kinds: str = "", limit: int = 20) -> dict[str, Any]:
+    """Full-text search over local sessions, ideas, prompt templates, and workflows.
+
+    `kinds` accepts a comma-separated subset of: session, idea, prompt_template, workflow.
+    Returns ranked hits with kind, doc_id, title, excerpt, updated_at, score.
+    Equivalent to GET /api/search.
+    """
+    from backend.storage.search_index import KINDS as _KINDS, get_search_index
+    if not query or not query.strip():
+        return {"query": query, "hits": [], "total": 0}
+    kind_list: list[str] | None = None
+    if kinds.strip():
+        kind_list = [k.strip() for k in kinds.split(",") if k.strip() in _KINDS]
+    limit = max(1, min(int(limit or 20), 100))
+    hits = get_search_index().search(query, kinds=kind_list, limit=limit)
+    return {"query": query, "hits": hits, "total": len(hits)}
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

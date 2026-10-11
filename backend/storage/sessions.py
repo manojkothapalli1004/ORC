@@ -19,6 +19,34 @@ from backend.models.session import (
     WorkSession,
 )
 from backend.services.summarizer import SessionSummarizer
+from backend.storage.search_index import get_search_index
+
+
+def _index_session(session: WorkSession) -> None:
+    parts: list[str] = []
+    if session.last_result_summary:
+        parts.append(session.last_result_summary)
+    if session.next_expected_action:
+        parts.append(session.next_expected_action)
+    if session.handoff_summary:
+        # SessionHandoffSummary may carry a free-text body / notes — coerce to str.
+        parts.append(str(session.handoff_summary.model_dump()))
+    if session.restart_prompt:
+        parts.append(str(session.restart_prompt.model_dump()))
+    for evt in session.lifecycle:
+        if evt.note:
+            parts.append(evt.note)
+        if evt.result_summary:
+            parts.append(evt.result_summary)
+    title = f"session/{session.role}/{session.status.value}"
+    body = "\n".join(p for p in parts if p)
+    try:
+        get_search_index().upsert(
+            "session", session.session_id, title, body, session.updated_at
+        )
+    except Exception:
+        # Indexing must never block a successful save.
+        pass
 
 
 class SessionStore:
@@ -48,6 +76,7 @@ class SessionStore:
         tmp = self._path(session.session_id).with_suffix('.tmp')
         tmp.write_text(session.model_dump_json(indent=2))
         tmp.rename(self._path(session.session_id))
+        _index_session(session)
         return session
 
     def create(self, session: WorkSession) -> WorkSession:
