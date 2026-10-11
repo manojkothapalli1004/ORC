@@ -1493,7 +1493,7 @@ from backend.models.scheduler import (
 from backend.services.scheduler import get_scheduler, parse_cron
 
 
-def _job_payload(job: ScheduledJob) -> dict:
+def _scheduled_job_payload(job: ScheduledJob) -> dict:
     return {
         "id": job.id,
         "name": job.name,
@@ -1513,7 +1513,7 @@ def _job_payload(job: ScheduledJob) -> dict:
 @router.get("/scheduler/jobs")
 async def list_scheduled_jobs():
     sched = get_scheduler()
-    return {"jobs": [_job_payload(j) for j in sched.list_jobs()]}
+    return {"jobs": [_scheduled_job_payload(j) for j in sched.list_jobs()]}
 
 
 @router.post("/scheduler/jobs")
@@ -1530,7 +1530,7 @@ async def create_scheduled_job(request: CreateScheduledJobRequest):
         enabled=request.enabled,
     )
     saved = get_scheduler().create(job)
-    return _job_payload(saved)
+    return _scheduled_job_payload(saved)
 
 
 @router.patch("/scheduler/jobs/{job_id}")
@@ -1547,7 +1547,7 @@ async def update_scheduled_job(job_id: str, request: UpdateScheduledJobRequest):
         raise HTTPException(status_code=400, detail=f"invalid cron expression: {exc}")
     if updated is None:
         raise HTTPException(status_code=404, detail="job not found")
-    return _job_payload(updated)
+    return _scheduled_job_payload(updated)
 
 
 @router.delete("/scheduler/jobs/{job_id}")
