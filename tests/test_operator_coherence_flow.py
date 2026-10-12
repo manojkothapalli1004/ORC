@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +14,10 @@ from backend.prompts import PromptComposer
 from backend.storage import BuilderJobStore, IdeaStore, PromptTemplateStore, SessionStore, StateStore
 from backend.workflows import WorkflowModeResolver
 from backend.models.core import ApprovalMode, ApprovalStatus, Proposal, WorkflowExecutionMode, WorkflowState, WorkflowStatus
+
+
+_TEST_USERNAME = "coherence-operator"
+_TEST_PASSWORD = "coherence-test-pass"
 
 
 class OperatorCoherenceFlowTest(unittest.TestCase):
@@ -32,6 +37,8 @@ class OperatorCoherenceFlowTest(unittest.TestCase):
             "idea_thread_dir": settings.idea_thread_dir,
             "prompt_template_dir": settings.prompt_template_dir,
             "local_network_only": settings.local_network_only,
+            "local_access_username": settings.local_access_username,
+            "local_access_password": settings.local_access_password,
             "store": routes.store,
             "job_store": routes.job_store,
             "session_store": routes.session_store,
@@ -45,7 +52,11 @@ class OperatorCoherenceFlowTest(unittest.TestCase):
         settings.session_dir = self.session_dir
         settings.idea_thread_dir = self.idea_dir
         settings.prompt_template_dir = self.prompt_dir
+        # TestClient's client host is "testclient" (non-private), so with
+        # local_network_only disabled every request must carry Basic auth.
         settings.local_network_only = False
+        settings.local_access_username = _TEST_USERNAME
+        settings.local_access_password = _TEST_PASSWORD
 
         routes.store = StateStore(self.state_dir)
         routes.job_store = BuilderJobStore(self.job_dir)
@@ -54,7 +65,8 @@ class OperatorCoherenceFlowTest(unittest.TestCase):
         routes.prompt_store = PromptTemplateStore(self.prompt_dir)
         routes.prompt_composer = PromptComposer(routes.prompt_store)
 
-        self.client = TestClient(app)
+        token = base64.b64encode(f"{_TEST_USERNAME}:{_TEST_PASSWORD}".encode("utf-8")).decode("ascii")
+        self.client = TestClient(app, headers={"Authorization": f"Basic {token}"})
         self.workflow_id = "wfcoherence01"
         self.proposal_id = "propcoh1"
         self._seed_workflow()
@@ -66,6 +78,8 @@ class OperatorCoherenceFlowTest(unittest.TestCase):
         settings.idea_thread_dir = self._original["idea_thread_dir"]
         settings.prompt_template_dir = self._original["prompt_template_dir"]
         settings.local_network_only = self._original["local_network_only"]
+        settings.local_access_username = self._original["local_access_username"]
+        settings.local_access_password = self._original["local_access_password"]
         routes.store = self._original["store"]
         routes.job_store = self._original["job_store"]
         routes.session_store = self._original["session_store"]
@@ -103,6 +117,11 @@ class OperatorCoherenceFlowTest(unittest.TestCase):
             current_stage="approved",
         )
         routes.store.save(state)
+
+    def test_unauthenticated_public_client_is_challenged(self) -> None:
+        anon = TestClient(app)
+        response = anon.get(f"/api/workflows/{self.workflow_id}")
+        self.assertEqual(response.status_code, 401)
 
     def test_dispatch_assignment_preview_delivery_followup_result_stays_non_completed(self) -> None:
         dispatch = self.client.post(

@@ -1,8 +1,4 @@
-"""Tests for backend/security.py local-network access controls.
-
-These tests pin current behaviour of the security helpers. They do not change
-behaviour. Gaps found during review are recorded as xfail tests with comments.
-"""
+"""Tests for backend/security.py local-network access controls."""
 
 from __future__ import annotations
 
@@ -172,19 +168,41 @@ def test_missing_client_blocked_when_local_network_only(fake_settings):
     assert called is False
 
 
-def test_public_client_allowed_when_local_network_only_disabled(fake_settings):
-    # Documents current behaviour: with the flag off, non-local clients bypass
-    # all checks, including the password.
+def test_public_client_without_auth_challenged_when_local_network_only_disabled(fake_settings):
     fake_settings.local_network_only = False
     response, called = _dispatch(PUBLIC_HOST)
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"].startswith("Basic ")
+    assert called is False
+
+
+def test_public_client_with_valid_auth_passes_when_local_network_only_disabled(fake_settings):
+    fake_settings.local_network_only = False
+    response, called = _dispatch(PUBLIC_HOST, headers={"Authorization": _basic(USERNAME, PASSWORD)})
     assert response.status_code == 200
     assert called is True
 
 
-@pytest.mark.parametrize("host", ["127.0.0.1", "::1"])
-@pytest.mark.parametrize("path", ["/", "/api/status", "/static/app.js"])
+def test_public_client_gets_503_without_configured_password(fake_settings):
+    fake_settings.local_network_only = False
+    fake_settings.local_access_password = ""
+    response, called = _dispatch(PUBLIC_HOST)
+    assert response.status_code == 503
+    assert "LOCAL_ACCESS_PASSWORD" in _json(response)["detail"]
+    assert called is False
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1", "::ffff:127.0.0.1"])
+@pytest.mark.parametrize("path", ["/", "/api/status", "/static/app.js", "/docs"])
 def test_loopback_client_needs_no_password(fake_settings, host, path):
     response, called = _dispatch(host, path=path)
+    assert response.status_code == 200
+    assert called is True
+
+
+def test_ipv4_mapped_loopback_is_exempt(fake_settings):
+    fake_settings.local_access_password = ""
+    response, called = _dispatch("::ffff:127.0.0.1", path="/openapi.json")
     assert response.status_code == 200
     assert called is True
 
@@ -194,7 +212,7 @@ def test_loopback_client_needs_no_password(fake_settings, host, path):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("path", ["/", "/api/status", "/api/../api/status", "/static/app.js"])
+@pytest.mark.parametrize("path", ["/", "/api/status", "/api/../api/status", "/static/app.js", "/healthz"])
 def test_lan_client_without_auth_is_challenged(fake_settings, path):
     response, called = _dispatch(LAN_HOST, path=path)
     assert response.status_code == 401
@@ -240,6 +258,7 @@ def test_lan_client_with_none_password_configured_gets_503(fake_settings):
         _basic("", PASSWORD),
         _basic("../" + USERNAME, PASSWORD),
         _basic(USERNAME, "A" * 100_000),
+        _basic("\u00e4dmin", PASSWORD),
     ],
 )
 def test_lan_client_with_bad_credentials_is_rejected(fake_settings, auth_header):
@@ -256,64 +275,40 @@ def test_password_containing_colon_is_supported(fake_settings):
     assert called is True
 
 
+def test_non_ascii_configured_password_is_supported(fake_settings):
+    fake_settings.local_access_password = "p\u00e4ssword"
+    response, called = _dispatch(LAN_HOST, headers={"Authorization": _basic(USERNAME, "p\u00e4ssword")})
+    assert response.status_code == 200
+    assert called is True
+
+
 def test_ipv4_mapped_lan_client_requires_auth(fake_settings):
     response, called = _dispatch("::ffff:192.168.1.50")
     assert response.status_code == 401
     assert called is False
 
 
-def test_lan_client_unprotected_path_currently_passes(fake_settings):
-    # Documents current behaviour: only "/", "/api*" and "/static/*" are
-    # gated for LAN clients.
-    response, called = _dispatch(LAN_HOST, path="/healthz")
-    assert response.status_code == 200
-    assert called is True
-
-
 # ---------------------------------------------------------------------------
-# Known gaps (recorded, not fixed)
+# Previously known gaps, now fixed
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason=(
-        "secrets.compare_digest raises TypeError for non-ASCII str input, so a "
-        "LAN client sending a non-ASCII password triggers a 500 instead of a "
-        "401. Comparing encoded bytes would avoid this."
-    ),
-    strict=False,
-)
 def test_non_ascii_password_attempt_returns_401(fake_settings):
     response, called = _dispatch(LAN_HOST, headers={"Authorization": _basic(USERNAME, "p\u00e4ssword")})
     assert response.status_code == 401
     assert called is False
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Only '/', '/api*' and '/static/*' require auth for LAN clients. FastAPI's "
-        "/docs, /redoc and /openapi.json (and any other route) are reachable from "
-        "the LAN without a password, which exposes the API schema."
-    ),
-    strict=False,
-)
-@pytest.mark.parametrize("path", ["/docs", "/openapi.json", "/redoc"])
+@pytest.mark.parametrize("path", ["/docs", "/openapi.json", "/redoc", "/api/docs"])
 def test_lan_client_docs_paths_require_auth(fake_settings, path):
     response, called = _dispatch(LAN_HOST, path=path)
     assert response.status_code == 401
     assert called is False
 
 
-@pytest.mark.xfail(
-    reason=(
-        "The Basic auth scheme is matched case-sensitively ('Basic '), but RFC "
-        "7235 says scheme names are case-insensitive. Clients that send 'basic' "
-        "are rejected."
-    ),
-    strict=False,
-)
-def test_lowercase_basic_scheme_is_accepted(fake_settings):
-    header = _basic(USERNAME, PASSWORD).replace("Basic ", "basic ", 1)
+@pytest.mark.parametrize("scheme", ["basic", "BASIC", "bAsIc"])
+def test_lowercase_basic_scheme_is_accepted(fake_settings, scheme):
+    header = _basic(USERNAME, PASSWORD).replace("Basic ", f"{scheme} ", 1)
     response, called = _dispatch(LAN_HOST, headers={"Authorization": header})
     assert response.status_code == 200
     assert called is True
