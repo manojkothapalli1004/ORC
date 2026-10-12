@@ -41,6 +41,9 @@ def _unauthorized_response() -> Response:
 
 
 def _credentials_valid(auth_header: str) -> bool:
+    expected_password = str(settings.local_access_password or "")
+    if not expected_password:
+        return False
     scheme, _, token = auth_header.partition(" ")
     if scheme.lower() != "basic":
         return False
@@ -53,7 +56,6 @@ def _credentials_valid(auth_header: str) -> bool:
         return False
     username, _, password = decoded.partition(":")
     expected_username = str(settings.local_access_username or "")
-    expected_password = str(settings.local_access_password or "")
     username_ok = secrets.compare_digest(username.encode("utf-8"), expected_username.encode("utf-8"))
     password_ok = secrets.compare_digest(password.encode("utf-8"), expected_password.encode("utf-8"))
     return username_ok and password_ok

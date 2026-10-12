@@ -14,6 +14,7 @@ from fastapi.responses import PlainTextResponse
 import backend.security as security
 from backend.security import (
     LocalConsoleSecurityMiddleware,
+    _credentials_valid,
     _is_private_or_loopback,
     _unauthorized_response,
 )
@@ -310,5 +311,51 @@ def test_lan_client_docs_paths_require_auth(fake_settings, path):
 def test_lowercase_basic_scheme_is_accepted(fake_settings, scheme):
     header = _basic(USERNAME, PASSWORD).replace("Basic ", f"{scheme} ", 1)
     response, called = _dispatch(LAN_HOST, headers={"Authorization": header})
+    assert response.status_code == 200
+    assert called is True
+
+
+# ---------------------------------------------------------------------------
+# _credentials_valid: empty configured password is rejected in the check itself
+# ---------------------------------------------------------------------------
+
+
+def test_credentials_valid_rejects_when_password_unset(fake_settings):
+    fake_settings.local_access_password = ""
+    fake_settings.local_access_username = ""
+    header = "Basic " + base64.b64encode(b":").decode("ascii")
+    assert header == "Basic Og=="
+    assert _credentials_valid(header) is False
+
+
+def test_credentials_valid_rejects_when_password_none(fake_settings):
+    fake_settings.local_access_password = None
+    fake_settings.local_access_username = ""
+    header = "Basic " + base64.b64encode(b":").decode("ascii")
+    assert _credentials_valid(header) is False
+
+
+def test_credentials_valid_accepts_correct(fake_settings):
+    assert _credentials_valid(_basic(USERNAME, PASSWORD)) is True
+
+
+# ---------------------------------------------------------------------------
+# Non-loopback hostnames are not exempt when local_network_only is disabled
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("host", ["testclient", "0.0.0.0"])
+def test_non_loopback_host_without_auth_gets_401_when_local_network_only_disabled(fake_settings, host):
+    fake_settings.local_network_only = False
+    response, called = _dispatch(host)
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == 'Basic realm="orchestrator-local"'
+    assert called is False
+
+
+@pytest.mark.parametrize("host", ["testclient", "0.0.0.0"])
+def test_non_loopback_host_with_valid_auth_gets_200_when_local_network_only_disabled(fake_settings, host):
+    fake_settings.local_network_only = False
+    response, called = _dispatch(host, headers={"Authorization": _basic(USERNAME, PASSWORD)})
     assert response.status_code == 200
     assert called is True
