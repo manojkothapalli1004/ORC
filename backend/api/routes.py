@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
@@ -38,6 +40,7 @@ from backend.storage.builder_jobs import (
     dispatchability_payload,
 )
 from backend.workflows import WorkflowEngine, WorkflowModeResolver
+from backend.workflows.factory import build_engine
 
 router = APIRouter(prefix="/api")
 store = StateStore()
@@ -126,13 +129,7 @@ def _create_state(*, context: dict, approval_mode: str, workflow_mode: str | Non
 
 
 def _engine_for(state: WorkflowState) -> WorkflowEngine:
-    providers = registry.from_workflow(state)
-    return WorkflowEngine(
-        reviewer=providers["reviewer"],
-        planner=providers.get("planner", providers["reviewer"]),
-        builder=providers["builder"],
-        store=store,
-    )
+    return build_engine(state, store, registry)
 
 
 async def _run_demo_loop(state: WorkflowState) -> WorkflowState:
@@ -1560,7 +1557,9 @@ async def delete_scheduled_job(job_id: str):
 
 @router.post("/scheduler/jobs/{job_id}/run-now")
 async def run_scheduled_job_now(job_id: str):
-    run = get_scheduler().run_now(job_id)
+    # run_now is synchronous and may run a full workflow step; keep it off
+    # the event loop so other requests are served meanwhile.
+    run = await asyncio.to_thread(get_scheduler().run_now, job_id)
     if run is None:
         raise HTTPException(status_code=404, detail="job not found")
     return {

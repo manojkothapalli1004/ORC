@@ -15,7 +15,8 @@ Action types:
   calls when any provider is configured, including a router base URL with
   no key. A role using ``claude_code_local`` starts a local ``claude`` CLI
   process, which talks to Anthropic. With no provider configured it uses
-  the mock provider, which makes no external API call.
+  the mock provider, which makes no external API call. A step that leaves
+  the workflow in ``error`` status is recorded as an ``error`` run.
 
 Each run is recorded with status ``ok`` or ``error``.
 """
@@ -30,6 +31,7 @@ from typing import Any
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from backend.models.core import WorkflowStatus
 from backend.models.memory import MemoryUpdatePatch
 from backend.models.scheduler import ScheduledActionType, ScheduledJob, ScheduledRun
 from backend.storage.memory import MemoryStore
@@ -58,9 +60,10 @@ def parse_cron(expr: str) -> CronTrigger:
 def _run_coro(coro: Any) -> Any:
     """Run a coroutine to completion from sync code.
 
-    APScheduler fires us on a worker thread (no loop), so asyncio.run works.
-    If called from inside a running loop (e.g. run-now via an async API
-    route), run it on a fresh loop in a helper thread instead.
+    APScheduler and the run-now API route (via asyncio.to_thread) call us on
+    a worker thread with no running loop, so asyncio.run is used. As a
+    defensive fallback, if a loop is already running on this thread the
+    coroutine is run on a helper thread instead.
     """
     import asyncio
 
@@ -264,10 +267,10 @@ class Scheduler:
                 raise ValueError(f"workflow not found: {wf_id}")
             from backend.workflows.factory import build_engine
             engine = build_engine(state, self._state)
-            # WorkflowEngine.step is async; APScheduler fires us on a worker
-            # thread, so spin up a fresh loop here.
             state = _run_coro(engine.step(state))
             self._state.save(state)
+            if state.status == WorkflowStatus.ERROR:
+                raise RuntimeError(f"workflow step failed: id={wf_id} error={state.error}")
             return f"workflow stepped: id={wf_id} status={state.status.value}"
 
         raise ValueError(f"unknown action_type: {job.action_type}")
