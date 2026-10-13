@@ -16,7 +16,14 @@ This document is the forward view.
 - local provider registry (OpenAI / Anthropic / Gemini / Claude Code local)
 - MCP server surface (`orc mcp`) for Claude Desktop / Claude Code integration
 - LAN access mode with Basic Auth
-- mock-safe behavior when provider keys are unavailable
+- mock provider fallback when provider keys are unavailable
+
+## Unreleased — on main since V1
+
+- scheduled jobs: a local cron scheduler with three whitelisted actions (`fire_saved_prompt`, `record_memory_note`, `run_workflow_step`); each run is recorded with status `ok` or `error`
+- no scheduled action runs a shell command. `run_workflow_step` advances a workflow through the configured LLM providers: it can make network calls when any provider is configured, including a router base URL with no key, and a role using `claude_code_local` starts a local `claude` CLI process, which talks to Anthropic. With no provider configured it uses the mock provider.
+- full-text search: a SQLite FTS5 search index, rebuilt from the local JSON files on startup when empty
+- LAN auth hardening: non-local clients are rejected when `LOCAL_NETWORK_ONLY` is on; LAN clients need Basic Auth, and the console refuses them (503) until `LOCAL_ACCESS_PASSWORD` is set; credentials are compared in constant time
 
 ## V2 — near-term
 
@@ -28,7 +35,7 @@ Items that strengthen V1 without changing the shape of the product:
 - clearer worker-operation docs for manual-safe vs provider-backed execution
 - workflow result disaggregation when multiple experiments run concurrently
 - export / import of canonical memory between installations
-- GitHub Actions CI (lint, type-check, run the single existing test)
+- GitHub Actions CI (lint, type-check, run the test suite)
 
 ## V3 and beyond — exploratory direction
 

@@ -14,7 +14,15 @@ def _now() -> datetime:
 
 
 class ScheduledActionType(str, Enum):
-    """Whitelisted action types. No shell, no external network."""
+    """Whitelisted action types.
+
+    No scheduled action runs a shell command. ``run_workflow_step`` advances a
+    workflow through the configured LLM providers: it can make network calls
+    when any provider is configured, including a router base URL with no key,
+    and a role using ``claude_code_local`` starts a local ``claude`` CLI
+    process, which talks to Anthropic. With no provider configured it uses the
+    mock provider.
+    """
 
     FIRE_SAVED_PROMPT = "fire_saved_prompt"
     RECORD_MEMORY_NOTE = "record_memory_note"
@@ -31,7 +39,7 @@ class ScheduledJob(BaseModel):
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
     last_run_at: datetime | None = None
-    last_status: str | None = None     # "ok" | "error" | "skipped"
+    last_status: str | None = None     # "ok" | "error"
     last_output: str = ""
     next_run_at: datetime | None = None
 
@@ -54,5 +62,5 @@ class UpdateScheduledJobRequest(BaseModel):
 class ScheduledRun(BaseModel):
     job_id: str
     fired_at: datetime
-    status: str          # "ok" | "error" | "skipped"
+    status: str          # "ok" | "error"
     output: str = ""

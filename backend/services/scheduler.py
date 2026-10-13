@@ -1,8 +1,8 @@
 """Local cron scheduler.
 
 Wraps APScheduler's BackgroundScheduler with a small action registry.
-Actions are restricted to a whitelist — no shell, no external network — to
-stay aligned with ORC's V1 non-goals.
+Actions are restricted to a whitelist. No scheduled action runs a shell
+command.
 
 Action types:
 - ``fire_saved_prompt`` — render a saved prompt template's body and append
@@ -10,8 +10,14 @@ Action types:
   day, queue up this prompt for me to copy into a Claude session").
 - ``record_memory_note`` — append a dated note to a canonical memory section
   via the existing MemoryStore.apply_patches path.
-- ``run_workflow_step`` — invoke the existing workflow engine's step on the
-  named workflow, in mock-safe mode if no provider keys are present.
+- ``run_workflow_step`` — advance the named workflow one step through the
+  workflow engine and the configured LLM providers. It can make network
+  calls when any provider is configured, including a router base URL with
+  no key. A role using ``claude_code_local`` starts a local ``claude`` CLI
+  process, which talks to Anthropic. With no provider configured it uses
+  the mock provider, which makes no external API call.
+
+Each run is recorded with status ``ok`` or ``error``.
 """
 
 from __future__ import annotations
