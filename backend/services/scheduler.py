@@ -49,6 +49,36 @@ def parse_cron(expr: str) -> CronTrigger:
     return CronTrigger(minute=minute, hour=hour, day=day, month=month, day_of_week=dow)
 
 
+def _run_coro(coro: Any) -> Any:
+    """Run a coroutine to completion from sync code.
+
+    APScheduler fires us on a worker thread (no loop), so asyncio.run works.
+    If called from inside a running loop (e.g. run-now via an async API
+    route), run it on a fresh loop in a helper thread instead.
+    """
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    result: dict[str, Any] = {}
+
+    def _target() -> None:
+        try:
+            result["value"] = asyncio.run(coro)
+        except BaseException as exc:  # pragma: no cover - re-raised below
+            result["error"] = exc
+
+    t = threading.Thread(target=_target, name="scheduler-workflow-step")
+    t.start()
+    t.join()
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
+
+
 class Scheduler:
     def __init__(self) -> None:
         self._sched = BackgroundScheduler()
@@ -220,18 +250,17 @@ class Scheduler:
             return f"memory update skipped: skipped={skipped}"
 
         if job.action_type == ScheduledActionType.RUN_WORKFLOW_STEP:
-            import asyncio
             wf_id = payload.get("workflow_id", "")
             if not wf_id:
                 raise ValueError("run_workflow_step requires workflow_id")
             state = self._state.load(wf_id)
             if state is None:
                 raise ValueError(f"workflow not found: {wf_id}")
-            from backend.workflows import WorkflowEngine
-            engine = WorkflowEngine()
+            from backend.workflows.factory import build_engine
+            engine = build_engine(state, self._state)
             # WorkflowEngine.step is async; APScheduler fires us on a worker
             # thread, so spin up a fresh loop here.
-            state = asyncio.run(engine.step(state))
+            state = _run_coro(engine.step(state))
             self._state.save(state)
             return f"workflow stepped: id={wf_id} status={state.status.value}"
 
