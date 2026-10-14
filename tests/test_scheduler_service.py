@@ -1,8 +1,10 @@
 """Regression and behaviour tests for backend/services/scheduler.py.
 
 Structural checks (AST and import identity) guard against helpers shadowing
-builder-job payload helpers. Behavioural checks exercise parse_cron and the
-returned trigger with fixed aware datetimes: no wall clock, no sleep.
+builder-job payload helpers. Behavioural checks exercise parse_cron: the
+field mapping is checked directly, and rollover is checked on a trigger with
+the same fields but an explicit UTC timezone, so results never depend on the
+machine timezone. Fixed aware datetimes only: no wall clock, no sleep.
 """
 
 import ast
@@ -12,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from apscheduler.triggers.cron import CronTrigger
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -123,49 +126,69 @@ def _parse_cron():
     return importlib.import_module(SCHEDULER_MODULE).parse_cron
 
 
+def _fields(trigger):
+    return {f.name: str(f) for f in trigger.fields}
+
+
+def _utc_trigger(expr):
+    """parse_cron(expr) rebuilt field-for-field with an explicit UTC timezone."""
+    trigger = _parse_cron()(expr)
+    assert isinstance(trigger, CronTrigger)
+    return CronTrigger(timezone=timezone.utc, **_fields(trigger))
+
+
+def _at(hour, minute, second=30):
+    return datetime(2026, 1, 15, hour, minute, second, tzinfo=timezone.utc)
+
+
 @pytest.mark.parametrize("expr", ["not a cron", "* * *", "61 * * * *", "* 25 * * *"])
 def test_parse_cron_invalid_raises_value_error(expr):
     with pytest.raises(ValueError):
         _parse_cron()(expr)
 
 
-def _local_base(trigger, hour, minute, second=30):
-    """A fixed aware datetime on 2026-01-15 at the given wall time in the trigger's tz."""
-    tz = getattr(trigger, "timezone", None) or timezone.utc
-    anchor = datetime(2026, 1, 15, 12, 0, 0, tzinfo=timezone.utc).astimezone(tz)
-    return anchor.replace(hour=hour, minute=minute, second=second, microsecond=0), tz
+def test_parse_cron_maps_five_fields_in_order():
+    fields = _fields(_parse_cron()("5 4 3 2 1"))
+    assert fields["minute"] == "5"
+    assert fields["hour"] == "4"
+    assert fields["day"] == "3"
+    assert fields["month"] == "2"
+    assert fields["day_of_week"] == "1"
+    assert fields["second"] == "0"
+
+
+def test_parse_cron_strips_whitespace():
+    fields = _fields(_parse_cron()("  30 2 * * *  "))
+    assert (fields["minute"], fields["hour"]) == ("30", "2")
 
 
 def test_next_fire_minute_rollover():
-    trigger = _parse_cron()("* * * * *")
-    now, tz = _local_base(trigger, 10, 41)
+    trigger = _utc_trigger("* * * * *")
+    now = _at(10, 41)
     nxt = trigger.get_next_fire_time(None, now)
-    assert nxt is not None
-    local = nxt.astimezone(tz)
-    assert (local.hour, local.minute, local.second) == (10, 42, 0)
-    assert nxt > now
+    assert nxt == datetime(2026, 1, 15, 10, 42, 0, tzinfo=timezone.utc)
     assert nxt - now == timedelta(seconds=30)
 
 
 def test_next_fire_hour_rollover():
-    trigger = _parse_cron()("* * * * *")
-    now, tz = _local_base(trigger, 10, 59)
-    nxt = trigger.get_next_fire_time(None, now)
-    local = nxt.astimezone(tz)
-    assert (local.day, local.hour, local.minute, local.second) == (15, 11, 0, 0)
+    trigger = _utc_trigger("* * * * *")
+    nxt = trigger.get_next_fire_time(None, _at(10, 59))
+    assert nxt == datetime(2026, 1, 15, 11, 0, 0, tzinfo=timezone.utc)
 
 
 def test_next_fire_top_of_hour():
-    trigger = _parse_cron()("0 * * * *")
-    now, tz = _local_base(trigger, 10, 30)
-    nxt = trigger.get_next_fire_time(None, now)
-    local = nxt.astimezone(tz)
-    assert (local.day, local.hour, local.minute) == (15, 11, 0)
+    trigger = _utc_trigger("0 * * * *")
+    nxt = trigger.get_next_fire_time(None, _at(10, 30))
+    assert nxt == datetime(2026, 1, 15, 11, 0, 0, tzinfo=timezone.utc)
 
 
 def test_next_fire_day_rollover():
-    trigger = _parse_cron()("30 2 * * *")
-    now, tz = _local_base(trigger, 23, 0)
-    nxt = trigger.get_next_fire_time(None, now)
-    local = nxt.astimezone(tz)
-    assert (local.month, local.day, local.hour, local.minute) == (1, 16, 2, 30)
+    trigger = _utc_trigger("30 2 * * *")
+    nxt = trigger.get_next_fire_time(None, _at(23, 0))
+    assert nxt == datetime(2026, 1, 16, 2, 30, 0, tzinfo=timezone.utc)
+
+
+def test_next_fire_same_day_when_time_not_yet_passed():
+    trigger = _utc_trigger("30 2 * * *")
+    nxt = trigger.get_next_fire_time(None, _at(1, 0))
+    assert nxt == datetime(2026, 1, 15, 2, 30, 0, tzinfo=timezone.utc)

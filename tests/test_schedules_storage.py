@@ -1,13 +1,18 @@
 """Tests for backend/storage/schedules.py.
 
 Structural checks plus behavioural checks against ScheduleStore(tmp_path).
-Note: ScheduleStore.list_runs returns runs newest-first (fired_at descending)
-and append_run keeps only the last 50 runs.
+The real API is called directly (no signature sniffing):
+
+- create(ScheduledJob) -> ScheduledJob (id assigned)
+- get(job_id) -> ScheduledJob | None
+- update(ScheduledJob) -> ScheduledJob, FileNotFoundError for a missing id
+- delete(job_id) -> bool, also removes the per-job run file
+- append_run(ScheduledRun) -> None, keeps only the last 50 runs
+- list_runs(job_id) -> list[ScheduledRun], newest-first by fired_at
 """
 
 import ast
 import importlib
-import inspect
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,7 +24,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from backend.models.scheduler import (  # noqa: E402
-    CreateScheduledJobRequest,
     ScheduledActionType,
     ScheduledJob,
     ScheduledRun,
@@ -59,71 +63,28 @@ def _defs_shadowing_imports(tree):
     }
 
 
-def _get(obj, key):
-    if isinstance(obj, dict):
-        return obj.get(key)
-    return getattr(obj, key, None)
-
-
-def _as_dt(value):
-    if isinstance(value, str):
-        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value
-
-
-def _params(fn):
-    return [p for p in inspect.signature(fn).parameters.values() if p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)]
-
-
-def _create(store, name, cron="* * * * *"):
-    fields = dict(
+def _job(name, cron="* * * * *"):
+    return ScheduledJob(
         name=name,
         cron=cron,
         action_type=ScheduledActionType.RECORD_MEMORY_NOTE,
-        action_payload={"note": "hello"},
+        action_payload={"section": "notes", "note": "hello"},
     )
-    params = _params(store.create)
-    if len(params) == 1:
-        ann = str(params[0].annotation)
-        if "Create" in ann or params[0].annotation is inspect.Parameter.empty and "req" in params[0].name:
-            result = store.create(CreateScheduledJobRequest(**fields))
-        else:
-            result = store.create(ScheduledJob(**fields))
-    else:
-        result = store.create(**fields)
-    if isinstance(result, str):
-        return result
-    job_id = _get(result, "id")
-    assert job_id, f"create returned no id: {result!r}"
-    return job_id
 
 
-def _append(store, job_id, fired_at, output=""):
-    run = ScheduledRun(job_id=job_id, fired_at=fired_at, status="ok", output=output)
-    params = _params(store.append_run)
-    if len(params) == 1:
-        store.append_run(run)
-    elif len(params) == 2:
-        store.append_run(job_id, run)
-    else:
-        store.append_run(job_id=job_id, fired_at=fired_at, status="ok", output=output)
+def _create(store, name, cron="* * * * *"):
+    result = store.create(_job(name, cron))
+    assert isinstance(result, ScheduledJob)
+    assert result.id
+    return result
 
 
-def _list_runs(store, job_id):
-    names = {p.name: p for p in _params(store.list_runs)}
-    kwargs = {}
-    if "limit" in names:
-        kwargs["limit"] = 1000
-    required = [p for p in names.values() if p.default is p.empty and p.name != "limit"]
-    if required or "job_id" in names:
-        return list(store.list_runs(job_id, **kwargs))
-    return [r for r in store.list_runs(**kwargs) if _get(r, "job_id") == job_id]
+def _run(job_id, fired_at, output=""):
+    return ScheduledRun(job_id=job_id, fired_at=fired_at, status="ok", output=output)
 
 
-def _fired(runs):
-    return [_as_dt(_get(r, "fired_at")) for r in runs]
+def _run_file(tmp_path, job_id):
+    return tmp_path / "scheduler_runs" / f"{job_id}.json"
 
 
 def test_schedules_module_exists():
@@ -145,29 +106,87 @@ def test_schedules_module_imports_cleanly():
 
 
 def test_list_schedules_is_empty_for_fresh_state_dir(tmp_path):
-    assert list(ScheduleStore(tmp_path).list()) == []
+    assert ScheduleStore(tmp_path).list() == []
+
+
+def test_create_returns_job_with_id(tmp_path):
+    job = _create(ScheduleStore(tmp_path), "nightly", "30 2 * * *")
+    assert job.name == "nightly"
+    assert job.cron == "30 2 * * *"
 
 
 def test_create_round_trips_through_fresh_store(tmp_path):
-    job_id = _create(ScheduleStore(tmp_path), "nightly", "30 2 * * *")
-    jobs = list(ScheduleStore(tmp_path).list())
-    matching = [j for j in jobs if _get(j, "id") == job_id]
+    job = _create(ScheduleStore(tmp_path), "nightly", "30 2 * * *")
+    jobs = ScheduleStore(tmp_path).list()
+    matching = [j for j in jobs if j.id == job.id]
     assert len(matching) == 1, jobs
-    assert _get(matching[0], "name") == "nightly"
-    assert _get(matching[0], "cron") == "30 2 * * *"
+    assert isinstance(matching[0], ScheduledJob)
+    assert matching[0].name == "nightly"
+    assert matching[0].cron == "30 2 * * *"
+    assert matching[0].action_type == ScheduledActionType.RECORD_MEMORY_NOTE
+    assert matching[0].action_payload == {"section": "notes", "note": "hello"}
 
 
 def test_two_creates_give_distinct_ids(tmp_path):
     store = ScheduleStore(tmp_path)
-    a = _create(store, "a")
-    b = _create(store, "b")
+    a = _create(store, "a").id
+    b = _create(store, "b").id
     assert a != b
-    ids = {_get(j, "id") for j in store.list()}
-    assert {a, b} <= ids
+    assert {j.id for j in store.list()} == {a, b}
+
+
+def test_get_returns_created_job(tmp_path):
+    job = _create(ScheduleStore(tmp_path), "fetch", "0 9 * * 1")
+    got = ScheduleStore(tmp_path).get(job.id)
+    assert isinstance(got, ScheduledJob)
+    assert got.id == job.id
+    assert got.name == "fetch"
+    assert got.cron == "0 9 * * 1"
+
+
+def test_get_missing_returns_none(tmp_path):
+    assert ScheduleStore(tmp_path).get("does-not-exist") is None
+
+
+def test_update_persists_changed_field(tmp_path):
+    store = ScheduleStore(tmp_path)
+    job = _create(store, "before")
+    job.name = "after"
+    job.enabled = False
+    returned = store.update(job)
+    assert isinstance(returned, ScheduledJob)
+    reloaded = ScheduleStore(tmp_path).get(job.id)
+    assert reloaded is not None
+    assert reloaded.name == "after"
+    assert reloaded.enabled is False
+
+
+def test_update_missing_id_raises_file_not_found(tmp_path):
+    store = ScheduleStore(tmp_path)
+    ghost = _job("ghost")
+    ghost.id = "missing00000"
+    with pytest.raises(FileNotFoundError):
+        store.update(ghost)
+    assert store.get("missing00000") is None
 
 
 def test_delete_missing_returns_false(tmp_path):
     assert ScheduleStore(tmp_path).delete("does-not-exist") is False
+
+
+def test_delete_existing_removes_job_and_run_file(tmp_path):
+    store = ScheduleStore(tmp_path)
+    keep = _create(store, "keep")
+    gone = _create(store, "gone")
+    store.append_run(_run(gone.id, BASE))
+    assert _run_file(tmp_path, gone.id).is_file()
+
+    assert store.delete(gone.id) is True
+
+    assert store.get(gone.id) is None
+    assert [j.id for j in ScheduleStore(tmp_path).list()] == [keep.id]
+    assert not _run_file(tmp_path, gone.id).exists()
+    assert store.list_runs(gone.id) == []
 
 
 def _overwrite_json_files(root, text):
@@ -181,25 +200,57 @@ def _overwrite_json_files(root, text):
 def test_corrupt_or_non_dict_jobs_json_lists_empty(tmp_path, garbage):
     _create(ScheduleStore(tmp_path), "x")
     _overwrite_json_files(tmp_path, garbage)
-    assert list(ScheduleStore(tmp_path).list()) == []
+    assert ScheduleStore(tmp_path).list() == []
+
+
+def test_list_runs_empty_for_job_without_runs(tmp_path):
+    store = ScheduleStore(tmp_path)
+    job = _create(store, "quiet")
+    assert store.list_runs(job.id) == []
 
 
 def test_list_runs_is_newest_first(tmp_path):
     store = ScheduleStore(tmp_path)
-    job_id = _create(store, "runs")
+    job = _create(store, "runs")
     times = [BASE + timedelta(minutes=i) for i in range(3)]
     for i, t in enumerate(times):
-        _append(store, job_id, t, output=f"run{i}")
-    assert _fired(_list_runs(store, job_id)) == list(reversed(times))
+        store.append_run(_run(job.id, t, output=f"run{i}"))
+    runs = store.list_runs(job.id)
+    assert all(isinstance(r, ScheduledRun) for r in runs)
+    assert [r.fired_at for r in runs] == list(reversed(times))
+    assert [r.output for r in runs] == ["run2", "run1", "run0"]
+    assert all(r.job_id == job.id for r in runs)
+
+
+def test_list_runs_sorts_by_fired_at_not_append_order(tmp_path):
+    store = ScheduleStore(tmp_path)
+    job = _create(store, "out-of-order")
+    newer = BASE + timedelta(hours=2)
+    older = BASE + timedelta(hours=1)
+    store.append_run(_run(job.id, newer, output="newer"))
+    store.append_run(_run(job.id, older, output="older"))
+    runs = ScheduleStore(tmp_path).list_runs(job.id)
+    assert [r.fired_at for r in runs] == [newer, older]
+    assert [r.output for r in runs] == ["newer", "older"]
+
+
+def test_list_runs_is_scoped_to_job(tmp_path):
+    store = ScheduleStore(tmp_path)
+    a = _create(store, "a")
+    b = _create(store, "b")
+    store.append_run(_run(a.id, BASE, output="a"))
+    store.append_run(_run(b.id, BASE + timedelta(minutes=1), output="b"))
+    assert [r.output for r in store.list_runs(a.id)] == ["a"]
+    assert [r.output for r in store.list_runs(b.id)] == ["b"]
 
 
 def test_append_run_keeps_last_50(tmp_path):
     store = ScheduleStore(tmp_path)
-    job_id = _create(store, "many")
+    job = _create(store, "many")
     times = [BASE + timedelta(minutes=i) for i in range(52)]
     for t in times:
-        _append(store, job_id, t)
-    fired = _fired(_list_runs(store, job_id))
+        store.append_run(_run(job.id, t))
+    fired = [r.fired_at for r in store.list_runs(job.id)]
     assert len(fired) == 50
     assert fired == list(reversed(times[2:]))
     assert times[0] not in fired and times[1] not in fired
