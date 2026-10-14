@@ -6,6 +6,7 @@ Every store is rooted in tmp_path so the real data dir is never touched.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -15,33 +16,44 @@ from backend.models.memory import MEMORY_SECTION_NAMES, MemoryUpdatePatch, Proje
 from backend.storage.memory import MemoryStore
 
 
-class _NullIndex:
-    def upsert(self, *args, **kwargs):
-        return None
-
-    def delete(self, *args, **kwargs):
-        return None
-
-
-@pytest.fixture(autouse=True)
-def _no_search_index(monkeypatch):
-    monkeypatch.setattr(memory_mod, "get_search_index", lambda: _NullIndex(), raising=False)
-
-
 SECTIONS = sorted(MEMORY_SECTION_NAMES)
 INVALID_SECTION = "definitely_not_a_memory_section"
+
+_FIXED = datetime(2001, 2, 3, 4, 5, 6)
+FIXED_STAMP = "2001-02-03T04:05:06Z"
+
+
+class _FixedDatetime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        if tz is None:
+            return _FIXED
+        return _FIXED.replace(tzinfo=timezone.utc).astimezone(tz)
+
+    @classmethod
+    def utcnow(cls):
+        return _FIXED
+
+
+@pytest.fixture
+def fixed_clock(monkeypatch):
+    monkeypatch.setattr(memory_mod, "datetime", _FixedDatetime)
+
+
+def _header(source: str) -> str:
+    return f"[{FIXED_STAMP} \u00b7 {source}]\n"
 
 
 def _sections(mem: ProjectMemory) -> dict:
     return {name: getattr(mem, name) for name in SECTIONS}
 
 
-def test_section_names_are_real_fields():
-    assert len(SECTIONS) >= 1
+def test_section_names_are_exact_string_fields():
     assert INVALID_SECTION not in MEMORY_SECTION_NAMES
-    mem = ProjectMemory()
-    for name in SECTIONS:
-        assert hasattr(mem, name)
+    fields = ProjectMemory.model_fields
+    assert set(SECTIONS) <= set(fields)
+    str_fields = {name for name, info in fields.items() if info.annotation is str}
+    assert set(SECTIONS) == str_fields
 
 
 def test_init_creates_dir_and_uses_tmp_path(tmp_path: Path):
@@ -83,7 +95,7 @@ def test_save_load_round_trip(tmp_path: Path):
     assert again.model_dump(mode="json") == mem.model_dump(mode="json")
 
 
-def test_apply_patches_valid_and_invalid(tmp_path: Path):
+def test_apply_patches_valid_and_invalid(tmp_path: Path, fixed_clock):
     store = MemoryStore(memory_dir=tmp_path)
     seeded = ProjectMemory()
     for name in SECTIONS:
@@ -101,11 +113,8 @@ def test_apply_patches_valid_and_invalid(tmp_path: Path):
     assert applied == [target]
     assert skipped == [INVALID_SECTION]
 
-    body = getattr(memory, target)
-    assert body.endswith("new fact")
-    assert "unit_test]" in body
-    assert body.startswith("[")
-    assert "original" not in body  # replace=True
+    # replace=True: the whole body is exactly header + note.
+    assert getattr(memory, target) == _header("unit_test") + "new fact"
 
     # NEGATIVE: every other section is untouched.
     for name in SECTIONS[1:]:
@@ -118,7 +127,22 @@ def test_apply_patches_valid_and_invalid(tmp_path: Path):
         assert getattr(reloaded, name) == before[name]
 
 
-def test_apply_patches_appends_without_replace(tmp_path: Path):
+def test_patch_header_is_pinned_to_clock(tmp_path: Path, fixed_clock):
+    store = MemoryStore(memory_dir=tmp_path)
+    target = SECTIONS[0]
+    seeded = ProjectMemory()
+    setattr(seeded, target, "stale")
+    store.save(seeded)
+
+    memory, applied, _ = store.apply_patches(
+        [MemoryUpdatePatch(section=target, note="pinned", source="unit_test", replace=True)]
+    )
+    assert applied == [target]
+    assert getattr(memory, target) == f"[{FIXED_STAMP} \u00b7 unit_test]\npinned"
+    assert getattr(store.load(), target) == f"[{FIXED_STAMP} \u00b7 unit_test]\npinned"
+
+
+def test_apply_patches_appends_without_replace(tmp_path: Path, fixed_clock):
     store = MemoryStore(memory_dir=tmp_path)
     target = SECTIONS[-1]
     seeded = ProjectMemory()
@@ -130,9 +154,7 @@ def test_apply_patches_appends_without_replace(tmp_path: Path):
     )
     assert applied == [target]
     assert skipped == []
-    body = getattr(memory, target)
-    assert body.startswith("existing body\n\n[")
-    assert body.endswith("appended note")
+    assert getattr(memory, target) == "existing body\n\n" + _header("unit_test") + "appended note"
 
 
 def test_apply_patches_empty_note_and_case_normalisation(tmp_path: Path):
