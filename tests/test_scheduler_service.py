@@ -1,14 +1,14 @@
-"""Regression tests for backend/services/scheduler.py.
+"""Regression and behaviour tests for backend/services/scheduler.py.
 
-These guard against the class of bug fixed in the recent commit where a
-scheduler helper shadowed a builder-job payload helper. The checks are
-structural (AST and import identity), so they do not depend on the
-scheduler's runtime API and need no network or state directory.
+Structural checks (AST and import identity) guard against helpers shadowing
+builder-job payload helpers. Behavioural checks exercise parse_cron and the
+returned trigger with fixed aware datetimes: no wall clock, no sleep.
 """
 
 import ast
 import importlib
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -112,3 +112,60 @@ def test_imported_helpers_are_not_rebound_at_runtime():
         if actual is not expected:
             rebound[bound] = f"imported from {source_name} at line {lineno} but rebound in scheduler"
     assert not rebound, rebound
+
+
+# ---------------------------------------------------------------------------
+# parse_cron behaviour
+# ---------------------------------------------------------------------------
+
+
+def _parse_cron():
+    return importlib.import_module(SCHEDULER_MODULE).parse_cron
+
+
+@pytest.mark.parametrize("expr", ["not a cron", "* * *", "61 * * * *", "* 25 * * *"])
+def test_parse_cron_invalid_raises_value_error(expr):
+    with pytest.raises(ValueError):
+        _parse_cron()(expr)
+
+
+def _local_base(trigger, hour, minute, second=30):
+    """A fixed aware datetime on 2026-01-15 at the given wall time in the trigger's tz."""
+    tz = getattr(trigger, "timezone", None) or timezone.utc
+    anchor = datetime(2026, 1, 15, 12, 0, 0, tzinfo=timezone.utc).astimezone(tz)
+    return anchor.replace(hour=hour, minute=minute, second=second, microsecond=0), tz
+
+
+def test_next_fire_minute_rollover():
+    trigger = _parse_cron()("* * * * *")
+    now, tz = _local_base(trigger, 10, 41)
+    nxt = trigger.get_next_fire_time(None, now)
+    assert nxt is not None
+    local = nxt.astimezone(tz)
+    assert (local.hour, local.minute, local.second) == (10, 42, 0)
+    assert nxt > now
+    assert nxt - now == timedelta(seconds=30)
+
+
+def test_next_fire_hour_rollover():
+    trigger = _parse_cron()("* * * * *")
+    now, tz = _local_base(trigger, 10, 59)
+    nxt = trigger.get_next_fire_time(None, now)
+    local = nxt.astimezone(tz)
+    assert (local.day, local.hour, local.minute, local.second) == (15, 11, 0, 0)
+
+
+def test_next_fire_top_of_hour():
+    trigger = _parse_cron()("0 * * * *")
+    now, tz = _local_base(trigger, 10, 30)
+    nxt = trigger.get_next_fire_time(None, now)
+    local = nxt.astimezone(tz)
+    assert (local.day, local.hour, local.minute) == (15, 11, 0)
+
+
+def test_next_fire_day_rollover():
+    trigger = _parse_cron()("30 2 * * *")
+    now, tz = _local_base(trigger, 23, 0)
+    nxt = trigger.get_next_fire_time(None, now)
+    local = nxt.astimezone(tz)
+    assert (local.month, local.day, local.hour, local.minute) == (1, 16, 2, 30)
