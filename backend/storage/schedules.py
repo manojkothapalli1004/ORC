@@ -3,11 +3,18 @@
 Job definitions live in ``data/schedules.json`` (single file, atomic writes).
 Per-fire run records live in ``data/scheduler_runs/<job_id>.json`` as a
 bounded ring buffer (most recent N runs).
+
+Writes go through a uniquely named temp file in the same directory followed
+by ``os.replace``, and read-modify-write sequences are serialised by a
+process-wide lock, so concurrent writers never corrupt or clobber files.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +27,32 @@ from backend.models.scheduler import ScheduledJob, ScheduledRun
 _JOBS_FILE = "schedules.json"
 _RUNS_DIR = "scheduler_runs"
 _MAX_RUNS_PER_JOB = 50
+
+# Serialises read-modify-write cycles on schedule files within this process.
+_IO_LOCK = threading.RLock()
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    tmp = tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=str(path.parent),
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    )
+    tmp_name = tmp.name
+    try:
+        with tmp:
+            tmp.write(text)
+            tmp.flush()
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 class ScheduleStore:
@@ -43,9 +76,7 @@ class ScheduleStore:
             return {}
 
     def _write_all(self, data: dict[str, dict[str, Any]]) -> None:
-        tmp = self._jobs_file.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2, default=str))
-        tmp.replace(self._jobs_file)
+        _atomic_write_text(self._jobs_file, json.dumps(data, indent=2, default=str))
 
     def list(self) -> list[ScheduledJob]:
         out: list[ScheduledJob] = []
@@ -71,29 +102,35 @@ class ScheduleStore:
             job.id = self._new_id()
         job.created_at = job.created_at or datetime.now(timezone.utc)
         job.updated_at = datetime.now(timezone.utc)
-        data = self._read_all()
-        data[job.id] = json.loads(job.model_dump_json())
-        self._write_all(data)
+        with _IO_LOCK:
+            data = self._read_all()
+            data[job.id] = json.loads(job.model_dump_json())
+            self._write_all(data)
         return job
 
     def update(self, job: ScheduledJob) -> ScheduledJob:
         job.updated_at = datetime.now(timezone.utc)
-        data = self._read_all()
-        if job.id not in data:
-            raise FileNotFoundError(job.id)
-        data[job.id] = json.loads(job.model_dump_json())
-        self._write_all(data)
+        with _IO_LOCK:
+            data = self._read_all()
+            if job.id not in data:
+                raise FileNotFoundError(job.id)
+            data[job.id] = json.loads(job.model_dump_json())
+            self._write_all(data)
         return job
 
     def delete(self, job_id: str) -> bool:
-        data = self._read_all()
-        if job_id not in data:
-            return False
-        del data[job_id]
-        self._write_all(data)
-        run_path = self._run_path(job_id)
-        if run_path.exists():
-            run_path.unlink()
+        with _IO_LOCK:
+            data = self._read_all()
+            if job_id not in data:
+                return False
+            del data[job_id]
+            self._write_all(data)
+            run_path = self._run_path(job_id)
+            if run_path.exists():
+                try:
+                    run_path.unlink()
+                except FileNotFoundError:
+                    pass
         return True
 
     # -------- runs --------
@@ -103,18 +140,19 @@ class ScheduleStore:
 
     def append_run(self, run: ScheduledRun) -> None:
         path = self._run_path(run.job_id)
-        existing: list[dict[str, Any]] = []
-        if path.exists():
-            try:
-                existing = json.loads(path.read_text()) or []
-            except Exception:
+        with _IO_LOCK:
+            existing: list[dict[str, Any]] = []
+            if path.exists():
+                try:
+                    existing = json.loads(path.read_text()) or []
+                except Exception:
+                    existing = []
+            if not isinstance(existing, list):
                 existing = []
-        existing.append(json.loads(run.model_dump_json()))
-        if len(existing) > _MAX_RUNS_PER_JOB:
-            existing = existing[-_MAX_RUNS_PER_JOB:]
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(existing, indent=2, default=str))
-        tmp.replace(path)
+            existing.append(json.loads(run.model_dump_json()))
+            if len(existing) > _MAX_RUNS_PER_JOB:
+                existing = existing[-_MAX_RUNS_PER_JOB:]
+            _atomic_write_text(path, json.dumps(existing, indent=2, default=str))
 
     def list_runs(self, job_id: str) -> list[ScheduledRun]:
         path = self._run_path(job_id)

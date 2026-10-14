@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -12,6 +14,30 @@ from backend.models.core import WorkflowState
 from backend.storage.search_index import get_search_index
 
 logger = logging.getLogger("orchestrator.storage")
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` via a unique temp file + os.replace."""
+    tmp = tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=str(path.parent),
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    )
+    tmp_name = tmp.name
+    try:
+        with tmp:
+            tmp.write(text)
+            tmp.flush()
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 class StateStore:
@@ -42,9 +68,7 @@ class StateStore:
     def save(self, state: WorkflowState) -> None:
         from datetime import datetime, timezone
         state.updated_at = datetime.now(timezone.utc)
-        tmp = self._path(state.id).with_suffix(".tmp")
-        tmp.write_text(state.model_dump_json(indent=2))
-        tmp.rename(self._path(state.id))
+        _atomic_write_text(self._path(state.id), state.model_dump_json(indent=2))
         _index_workflow(state)
 
     def list_ids(self) -> list[str]:

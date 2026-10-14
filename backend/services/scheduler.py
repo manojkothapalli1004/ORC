@@ -19,6 +19,13 @@ Action types:
   the workflow in ``error`` status is recorded as an ``error`` run.
 
 Each run is recorded with status ``ok`` or ``error``.
+
+Concurrency: each job has its own non-blocking lock, so a job never runs
+twice at the same time (a second fire while one is in progress is recorded
+as an ``error`` run with output ``job already running: <id>``). After a run,
+only ``last_run_at``/``last_status``/``last_output`` are written back onto a
+fresh copy of the stored job, so edits made while the job was running
+(e.g. disabling it) are not overwritten.
 """
 
 from __future__ import annotations
@@ -97,6 +104,7 @@ class Scheduler:
         self._state = StateStore()
         self._lock = threading.Lock()
         self._started = False
+        self._job_locks: dict[str, threading.Lock] = {}
 
     # -------- lifecycle --------
 
@@ -183,6 +191,20 @@ class Scheduler:
 
     # -------- internals --------
 
+    def _job_lock(self, job_id: str) -> threading.Lock:
+        """Return the per-job lock, creating the lock dict lazily.
+
+        Lazy creation keeps Scheduler objects built via ``__new__`` (without
+        ``__init__``) working.
+        """
+        with self._lock:
+            locks = self.__dict__.setdefault("_job_locks", {})
+            lock = locks.get(job_id)
+            if lock is None:
+                lock = threading.Lock()
+                locks[job_id] = lock
+            return lock
+
     def _add_to_scheduler(self, job: ScheduledJob) -> None:
         trigger = parse_cron(job.cron)
         self._sched.add_job(
@@ -209,26 +231,53 @@ class Scheduler:
             return None
 
     def _fire(self, job: ScheduledJob) -> ScheduledRun:
-        # Re-load latest definition in case it was updated since the trigger fired.
-        latest = self._store.get(job.id) or job
-        fired_at = datetime.now(timezone.utc)
+        job_lock = self._job_lock(job.id)
+        if not job_lock.acquire(blocking=False):
+            output = f"job already running: {job.id}"
+            run = ScheduledRun(
+                job_id=job.id,
+                fired_at=datetime.now(timezone.utc),
+                status="error",
+                output=output,
+            )
+            logger.warning("scheduled job %s skipped: already running", job.id)
+            try:
+                self._store.append_run(run)
+            except Exception as exc:
+                logger.warning("could not record skipped run for %s: %s", job.id, exc)
+            return run
         try:
-            output = self._dispatch_action(latest)
-            status = "ok"
-        except Exception as exc:
-            output = f"{type(exc).__name__}: {exc}"
-            status = "error"
-            logger.warning("scheduled job %s failed: %s", latest.id, output)
-        run = ScheduledRun(job_id=latest.id, fired_at=fired_at, status=status, output=output[:4000])
-        self._store.append_run(run)
-        latest.last_run_at = fired_at
-        latest.last_status = status
-        latest.last_output = output[:1000]
-        try:
-            self._store.update(latest)
-        except FileNotFoundError:
-            pass
-        return run
+            # Re-load latest definition in case it was updated since the trigger fired.
+            latest = self._store.get(job.id) or job
+            fired_at = datetime.now(timezone.utc)
+            try:
+                output = self._dispatch_action(latest)
+                status = "ok"
+            except Exception as exc:
+                output = f"{type(exc).__name__}: {exc}"
+                status = "error"
+                logger.warning("scheduled job %s failed: %s", latest.id, output)
+            output = output if isinstance(output, str) else str(output)
+            run = ScheduledRun(job_id=latest.id, fired_at=fired_at, status=status, output=output[:4000])
+            self._store.append_run(run)
+            latest.last_run_at = fired_at
+            latest.last_status = status
+            latest.last_output = output[:1000]
+            # Persist only the run-result fields onto a fresh copy so that any
+            # concurrent edit (disable, rename, ...) made during the run survives.
+            with self._lock:
+                fresh = self._store.get(latest.id)
+                if fresh is not None:
+                    fresh.last_run_at = latest.last_run_at
+                    fresh.last_status = latest.last_status
+                    fresh.last_output = latest.last_output
+                    try:
+                        self._store.update(fresh)
+                    except FileNotFoundError:
+                        pass
+            return run
+        finally:
+            job_lock.release()
 
     def _dispatch_action(self, job: ScheduledJob) -> str:
         payload = job.action_payload or {}
