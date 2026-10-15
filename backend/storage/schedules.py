@@ -1,19 +1,18 @@
 """Persistence for scheduled-job definitions and per-fire run records.
 
-Job definitions live in ``data/schedules.json`` (single file, atomic writes).
-Per-fire run records live in ``data/scheduler_runs/<job_id>.json`` as a
-bounded ring buffer (most recent N runs).
+Job definitions live in ``data/schedules.json``, a single file written
+atomically. Per-fire run records live in ``data/scheduler_runs/<job_id>.json``
+as a bounded ring buffer of the most recent N runs.
 
-Writes go through a uniquely named temp file in the same directory followed
-by ``os.replace``, and read-modify-write sequences are serialised by a
-process-wide lock, so concurrent writers never corrupt or clobber files.
+Each write goes to a uniquely named temp file in the same directory and is
+then moved into place with ``os.replace``. Within this process, a
+process-wide lock serialises read-modify-write sequences. Across processes,
+files are never torn, but concurrent writers can lose updates.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -22,6 +21,7 @@ from typing import Any
 
 from backend.config import settings
 from backend.models.scheduler import ScheduledJob, ScheduledRun
+from backend.storage.atomic import atomic_write_text
 
 
 _JOBS_FILE = "schedules.json"
@@ -33,26 +33,7 @@ _IO_LOCK = threading.RLock()
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
-    tmp = tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        dir=str(path.parent),
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    )
-    tmp_name = tmp.name
-    try:
-        with tmp:
-            tmp.write(text)
-            tmp.flush()
-        os.replace(tmp_name, path)
-    except BaseException:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
+    atomic_write_text(path, text)
 
 
 class ScheduleStore:

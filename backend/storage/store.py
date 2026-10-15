@@ -4,40 +4,20 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import tempfile
 import uuid
 from pathlib import Path
 
 from backend.config import settings
 from backend.models.core import WorkflowState
+from backend.storage.atomic import atomic_write_text
 from backend.storage.search_index import get_search_index
 
 logger = logging.getLogger("orchestrator.storage")
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
-    """Write ``text`` to ``path`` via a unique temp file + os.replace."""
-    tmp = tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        dir=str(path.parent),
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    )
-    tmp_name = tmp.name
-    try:
-        with tmp:
-            tmp.write(text)
-            tmp.flush()
-        os.replace(tmp_name, path)
-    except BaseException:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
+    """Write ``text`` to ``path`` atomically (see backend.storage.atomic)."""
+    atomic_write_text(path, text)
 
 
 class StateStore:
