@@ -52,17 +52,35 @@ logger = logging.getLogger("orchestrator.scheduler")
 
 # Standard cron day-of-week numbering: 0 (and 7) = Sunday, 1 = Monday, ...
 _CRON_DOW_NAMES = ("sun", "mon", "tue", "wed", "thu", "fri", "sat")
+_CRON_DOW_NUMBERS = {name: index for index, name in enumerate(_CRON_DOW_NAMES)}
+
+
+def _dow_token_value(token: str, item: str) -> int:
+    """Resolve one day-of-week token (number or 3-letter name) to cron numbering."""
+    if token.isdigit():
+        return int(token)
+    value = _CRON_DOW_NUMBERS.get(token.lower())
+    if value is None:
+        raise ValueError(f"invalid day-of-week item: {item!r}")
+    return value
 
 
 def _translate_dow(dow: str) -> str:
     """Translate a standard-cron day-of-week field into APScheduler day names.
 
     APScheduler 3.x numbers weekdays from Monday=0, while standard cron uses
-    Sunday=0 (and 7). Numeric items are expanded into explicit day names so
-    the numbering can never be misread. Name items are passed through.
+    Sunday=0 (and 7). Every item is expanded into explicit day names so the
+    numbering can never be misread. Day names (sun..sat, 3-letter,
+    case-insensitive) are first mapped to their Sunday-first numbers
+    (sun=0 .. sat=6) and then go through the same numeric expansion, so
+    names and numbers behave identically: steps apply ('mon-fri/2' ->
+    mon,wed,fri), ranges are Sunday-first ('sun-sat' -> all days) and names
+    and numbers may be mixed in one range ('mon-5'). Names are never passed
+    through to APScheduler.
 
-    Raises ValueError for values > 7, wrapping ranges (a > b), bad steps or
-    empty items.
+    Raises ValueError for values > 7, wrapping ranges (a > b, e.g. '5-0' or
+    'fri-sun'), bad steps, empty items, unknown names, and the unsupported
+    '#' and 'L' extensions. Error messages quote the item as written.
     """
     dow = dow.strip()
     if dow == "*":
@@ -72,6 +90,8 @@ def _translate_dow(dow: str) -> str:
         item = raw_item.strip()
         if not item:
             raise ValueError(f"empty item in day-of-week field: {dow!r}")
+        if "#" in item or "L" in item or "l" in item:
+            raise ValueError(f"unsupported day-of-week item: {item!r}")
         base, slash, step_s = item.partition("/")
         if slash:
             if not step_s.isdigit() or int(step_s) < 1:
@@ -83,21 +103,9 @@ def _translate_dow(dow: str) -> str:
             lo, hi = 0, 6
         else:
             first, dash, last = base.partition("-")
-            first_num = first.isdigit()
-            last_num = last.isdigit() if dash else False
-            if not first_num and not last_num:
-                # Day names (e.g. 'mon', 'Mon-Fri'): pass through for APScheduler.
-                if dash and not last:
-                    raise ValueError(f"invalid day-of-week item: {item!r}")
-                out_item = item.lower()
-                if out_item not in out:
-                    out.append(out_item)
-                continue
-            if not first_num or (dash and not last_num):
-                raise ValueError(f"cannot mix numbers and names in day-of-week item: {item!r}")
-            lo = int(first)
+            lo = _dow_token_value(first, item)
             if dash:
-                hi = int(last)
+                hi = _dow_token_value(last, item)
             elif slash:
                 hi = 7 if lo == 7 else 6
             else:

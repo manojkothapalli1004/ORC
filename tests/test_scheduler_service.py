@@ -213,6 +213,7 @@ def test_next_fire_same_day_when_time_not_yet_passed():
 # ---------------------------------------------------------------------------
 
 _WEEKDAY = {0: "mon", 1: "tue", 2: "wed", 3: "thu", 4: "fri", 5: "sat", 6: "sun"}
+_ALL_DAYS = {"sun", "mon", "tue", "wed", "thu", "fri", "sat"}
 
 
 def _localize(tz, naive):
@@ -278,6 +279,16 @@ def test_dow_weekday_range_fires_friday_then_monday():
     [
         ("*/2", {"sun", "tue", "thu", "sat"}),
         ("0,3", {"sun", "wed"}),
+        ("mon-fri/2", {"mon", "wed", "fri"}),
+        ("sun-sat", _ALL_DAYS),
+        ("sun-wed", {"sun", "mon", "tue", "wed"}),
+        ("MON-Fri", {"mon", "tue", "wed", "thu", "fri"}),
+        ("0-7", _ALL_DAYS),
+        ("5-7", {"fri", "sat", "sun"}),
+        ("1-5/2", {"mon", "wed", "fri"}),
+        ("mon/2", {"mon", "wed", "fri"}),
+        ("mon-5", {"mon", "tue", "wed", "thu", "fri"}),
+        ("sat,sun", {"sat", "sun"}),
     ],
 )
 def test_dow_sets_of_days(dow, expected):
@@ -289,7 +300,31 @@ def test_dow_star_is_unchanged():
     assert _fields(_parse_cron()("0 9 * * *"))["day_of_week"] == "*"
 
 
-@pytest.mark.parametrize("dow", ["5-1", "8", "0-8", "*/0"])
+@pytest.mark.parametrize(
+    "dow, expected",
+    [
+        ("mon-fri/2", "mon,wed,fri"),
+        ("sun-wed", "sun,mon,tue,wed"),
+        ("MON-Fri", "mon,tue,wed,thu,fri"),
+        ("5-7", "fri,sat,sun"),
+        ("0-7", "sun,mon,tue,wed,thu,fri,sat"),
+    ],
+)
+def test_dow_translated_field(dow, expected):
+    assert _fields(_parse_cron()(f"0 9 * * {dow}"))["day_of_week"] == expected
+
+
+@pytest.mark.parametrize(
+    "dow",
+    ["5-1", "8", "0-8", "*/0", "fri-sun", "sat-sun", "fri#1", "L", "5L", "xyz", "monday", "mon-", "mon/x"],
+)
 def test_dow_invalid_raises_value_error(dow):
     with pytest.raises(ValueError):
         _parse_cron()(f"0 9 * * {dow}")
+
+
+@pytest.mark.parametrize("dow", ["FRI#1", "Xyz", "Fri-Sun", "5L"])
+def test_dow_error_names_item_as_written(dow):
+    with pytest.raises(ValueError) as excinfo:
+        _parse_cron()(f"0 9 * * {dow}")
+    assert repr(dow) in str(excinfo.value)
