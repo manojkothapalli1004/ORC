@@ -50,8 +50,75 @@ from backend.storage.store import StateStore
 logger = logging.getLogger("orchestrator.scheduler")
 
 
+# Standard cron day-of-week numbering: 0 (and 7) = Sunday, 1 = Monday, ...
+_CRON_DOW_NAMES = ("sun", "mon", "tue", "wed", "thu", "fri", "sat")
+
+
+def _translate_dow(dow: str) -> str:
+    """Translate a standard-cron day-of-week field into APScheduler day names.
+
+    APScheduler 3.x numbers weekdays from Monday=0, while standard cron uses
+    Sunday=0 (and 7). Numeric items are expanded into explicit day names so
+    the numbering can never be misread. Name items are passed through.
+
+    Raises ValueError for values > 7, wrapping ranges (a > b), bad steps or
+    empty items.
+    """
+    dow = dow.strip()
+    if dow == "*":
+        return "*"
+    out: list[str] = []
+    for raw_item in dow.split(","):
+        item = raw_item.strip()
+        if not item:
+            raise ValueError(f"empty item in day-of-week field: {dow!r}")
+        base, slash, step_s = item.partition("/")
+        if slash:
+            if not step_s.isdigit() or int(step_s) < 1:
+                raise ValueError(f"invalid step in day-of-week item: {item!r}")
+            step = int(step_s)
+        else:
+            step = 1
+        if base == "*":
+            lo, hi = 0, 6
+        else:
+            first, dash, last = base.partition("-")
+            first_num = first.isdigit()
+            last_num = last.isdigit() if dash else False
+            if not first_num and not last_num:
+                # Day names (e.g. 'mon', 'Mon-Fri'): pass through for APScheduler.
+                if dash and not last:
+                    raise ValueError(f"invalid day-of-week item: {item!r}")
+                out_item = item.lower()
+                if out_item not in out:
+                    out.append(out_item)
+                continue
+            if not first_num or (dash and not last_num):
+                raise ValueError(f"cannot mix numbers and names in day-of-week item: {item!r}")
+            lo = int(first)
+            if dash:
+                hi = int(last)
+            elif slash:
+                hi = 7 if lo == 7 else 6
+            else:
+                hi = lo
+            if lo > 7 or hi > 7:
+                raise ValueError(f"day-of-week value out of range 0-7: {item!r}")
+            if lo > hi:
+                raise ValueError(f"wrapping day-of-week range not supported: {item!r}")
+        for value in range(lo, hi + 1, step):
+            name = _CRON_DOW_NAMES[value % 7]
+            if name not in out:
+                out.append(name)
+    return ",".join(out)
+
+
 def parse_cron(expr: str) -> CronTrigger:
     """5-field cron expression -> APScheduler CronTrigger (local timezone).
+
+    The day-of-week field uses standard cron numbering (0 and 7 = Sunday,
+    1 = Monday, ...) and is translated to day names before being handed to
+    APScheduler, which would otherwise treat 0 as Monday.
 
     Raises ValueError if the expression is malformed.
     """
@@ -61,7 +128,13 @@ def parse_cron(expr: str) -> CronTrigger:
             f"cron expression must have exactly 5 fields (minute hour day month dow), got {len(parts)}"
         )
     minute, hour, day, month, dow = parts
-    return CronTrigger(minute=minute, hour=hour, day=day, month=month, day_of_week=dow)
+    return CronTrigger(
+        minute=minute,
+        hour=hour,
+        day=day,
+        month=month,
+        day_of_week=_translate_dow(dow),
+    )
 
 
 def _run_coro(coro: Any) -> Any:

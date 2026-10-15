@@ -2,9 +2,12 @@
 
 Structural checks (AST and import identity) guard against helpers shadowing
 builder-job payload helpers. Behavioural checks exercise parse_cron: the
-field mapping is checked directly, and rollover is checked on a trigger with
-the same fields but an explicit UTC timezone, so results never depend on the
-machine timezone. Fixed aware datetimes only: no wall clock, no sleep.
+field mapping is checked directly, rollover is checked on a trigger with the
+same fields but an explicit UTC timezone (so results never depend on the
+machine timezone), parse_cron's own timezone is pinned to the local zone
+APScheduler uses by default, and day-of-week numbering is checked against
+standard cron (0/7 = Sunday) on parse_cron's own trigger with an anchor built
+in the trigger's timezone. Fixed datetimes only: no wall clock, no sleep.
 """
 
 import ast
@@ -153,13 +156,24 @@ def test_parse_cron_maps_five_fields_in_order():
     assert fields["hour"] == "4"
     assert fields["day"] == "3"
     assert fields["month"] == "2"
-    assert fields["day_of_week"] == "1"
+    # cron dow 1 is Monday; translated to an explicit day name.
+    assert fields["day_of_week"] == "mon"
     assert fields["second"] == "0"
 
 
 def test_parse_cron_strips_whitespace():
     fields = _fields(_parse_cron()("  30 2 * * *  "))
     assert (fields["minute"], fields["hour"]) == ("30", "2")
+
+
+def test_parse_cron_uses_apscheduler_default_local_timezone():
+    # APScheduler 3.x CronTrigger falls back to tzlocal.get_localzone() when no
+    # timezone is given; parse_cron must keep that local-time behaviour.
+    from tzlocal import get_localzone
+
+    trigger = _parse_cron()("0 9 * * *")
+    assert str(trigger.timezone) == str(get_localzone())
+    assert str(trigger.timezone) == str(CronTrigger(minute="0").timezone)
 
 
 def test_next_fire_minute_rollover():
@@ -192,3 +206,90 @@ def test_next_fire_same_day_when_time_not_yet_passed():
     trigger = _utc_trigger("30 2 * * *")
     nxt = trigger.get_next_fire_time(None, _at(1, 0))
     assert nxt == datetime(2026, 1, 15, 2, 30, 0, tzinfo=timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# Day-of-week numbering (standard cron: 0/7 = Sunday, 1 = Monday)
+# ---------------------------------------------------------------------------
+
+_WEEKDAY = {0: "mon", 1: "tue", 2: "wed", 3: "thu", 4: "fri", 5: "sat", 6: "sun"}
+
+
+def _localize(tz, naive):
+    if hasattr(tz, "localize"):  # pytz-style zone
+        return tz.localize(naive)
+    return naive.replace(tzinfo=tz)
+
+
+def _dow_trigger_and_anchor(dow):
+    """parse_cron('0 9 * * <dow>') and Thursday 2026-01-01 12:00 in its timezone."""
+    trigger = _parse_cron()(f"0 9 * * {dow}")
+    anchor = _localize(trigger.timezone, datetime(2026, 1, 1, 12, 0, 0))
+    assert anchor.weekday() == 3  # Thursday
+    return trigger, anchor
+
+
+def _fires(dow, count):
+    trigger, anchor = _dow_trigger_and_anchor(dow)
+    out = []
+    prev = None
+    now = anchor
+    for _ in range(count):
+        nxt = trigger.get_next_fire_time(prev, now)
+        assert nxt is not None
+        out.append(nxt)
+        prev = nxt
+        now = nxt + timedelta(seconds=1)
+    return out
+
+
+@pytest.mark.parametrize(
+    "dow, expected",
+    [
+        ("0", "sun"),
+        ("7", "sun"),
+        ("1", "mon"),
+        ("6", "sat"),
+        ("mon", "mon"),
+        ("MON", "mon"),
+    ],
+)
+def test_dow_single_value_next_fire_weekday(dow, expected):
+    nxt = _fires(dow, 1)[0]
+    assert _WEEKDAY[nxt.weekday()] == expected
+    assert (nxt.hour, nxt.minute) == (9, 0)
+
+
+def test_dow_sunday_fires_on_first_sunday_after_anchor():
+    nxt = _fires("0", 1)[0]
+    assert nxt.date() == datetime(2026, 1, 4).date()
+
+
+def test_dow_weekday_range_fires_friday_then_monday():
+    first, second = _fires("1-5", 2)
+    assert first.date() == datetime(2026, 1, 2).date()
+    assert _WEEKDAY[first.weekday()] == "fri"
+    assert second.date() == datetime(2026, 1, 5).date()
+    assert _WEEKDAY[second.weekday()] == "mon"
+
+
+@pytest.mark.parametrize(
+    "dow, expected",
+    [
+        ("*/2", {"sun", "tue", "thu", "sat"}),
+        ("0,3", {"sun", "wed"}),
+    ],
+)
+def test_dow_sets_of_days(dow, expected):
+    weekdays = {_WEEKDAY[f.weekday()] for f in _fires(dow, 12)}
+    assert weekdays == expected
+
+
+def test_dow_star_is_unchanged():
+    assert _fields(_parse_cron()("0 9 * * *"))["day_of_week"] == "*"
+
+
+@pytest.mark.parametrize("dow", ["5-1", "8", "0-8", "*/0"])
+def test_dow_invalid_raises_value_error(dow):
+    with pytest.raises(ValueError):
+        _parse_cron()(f"0 9 * * {dow}")
