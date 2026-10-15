@@ -71,13 +71,34 @@ def _make_template() -> PromptTemplate:
 
 def _make_variant_template() -> PromptTemplate:
     return PromptTemplate(
-        id="c1c_variant_template",
+        id="zz_variant_template",
         name="C1c variant template",
         category=PromptTemplateCategory.ROLE,
         role=PromptRole.BUILDER,
         body="Variant body.",
         variant="experimental",
         composition_order=5,
+    )
+
+
+def _make_zz_role_template() -> PromptTemplate:
+    return PromptTemplate(
+        id="zz-role",
+        name="ZZ role template",
+        category=PromptTemplateCategory.ROLE,
+        body="Early role body.",
+        composition_order=5,
+    )
+
+
+def _tie_template(template_id: str, order: int = 1) -> PromptTemplate:
+    return PromptTemplate(
+        id=template_id,
+        name="Tie template",
+        category=PromptTemplateCategory.ASSISTANT_SAVED,
+        role=PromptRole.REVIEWER,
+        body=f"Body for {template_id}.",
+        composition_order=order,
     )
 
 
@@ -159,6 +180,7 @@ def test_by_category_filters_exactly_and_sorted(tmp_path: Path):
     store = PromptTemplateStore(root_dir=tmp_path)
     template = _make_template()
     store.save(template)
+    store.save(_make_zz_role_template())
     all_templates = store.list()
 
     for category in PromptTemplateCategory:
@@ -168,12 +190,15 @@ def test_by_category_filters_exactly_and_sorted(tmp_path: Path):
         assert {t.id for t in result} == expected
         assert [t.id for t in result] == [t.id for t in sorted(result, key=_sort_key)]
 
-    assert [t.id for t in store.by_category(PromptTemplateCategory.ROLE)] == [
+    expected_role = [
+        "zz-role",
         "role-builder",
         "role-planner",
         "role-reviewer",
         "role-verifier",
     ]
+    assert [t.id for t in store.by_category(PromptTemplateCategory.ROLE)] == expected_role
+    assert expected_role != sorted(expected_role)
 
     saved_ids = {t.id for t in store.by_category(PromptTemplateCategory.ASSISTANT_SAVED)}
     assert template.id in saved_ids
@@ -198,7 +223,9 @@ def test_by_role_filters_exactly_and_sorted(tmp_path: Path):
         assert [t.id for t in result] == [t.id for t in sorted(result, key=_sort_key)]
 
     # role-verifier (order 20) sorts before the saved template (order 100).
-    assert [t.id for t in store.by_role(PromptRole.VERIFIER)] == ["role-verifier", template.id]
+    expected_verifier = ["role-verifier", template.id]
+    assert [t.id for t in store.by_role(PromptRole.VERIFIER)] == expected_verifier
+    assert expected_verifier != sorted(expected_verifier)
     for role in PromptRole:
         if role != PromptRole.VERIFIER:
             assert template.id not in {t.id for t in store.by_role(role)}
@@ -208,7 +235,7 @@ def test_filter_no_args_returns_all_sorted(tmp_path: Path):
     store = PromptTemplateStore(root_dir=tmp_path)
     result = store.filter()
     assert {t.id for t in result} == DEFAULT_IDS
-    assert [t.id for t in result] == [
+    expected = [
         "startup-default",
         "role-builder",
         "role-planner",
@@ -218,6 +245,8 @@ def test_filter_no_args_returns_all_sorted(tmp_path: Path):
         "safety-default",
         "return-format-default",
     ]
+    assert [t.id for t in result] == expected
+    assert expected != sorted(expected)
 
 
 def test_filter_by_category(tmp_path: Path):
@@ -225,13 +254,15 @@ def test_filter_by_category(tmp_path: Path):
     store.save(_make_template())
     store.save(_make_variant_template())
 
-    assert [t.id for t in store.filter(category=PromptTemplateCategory.ROLE)] == [
-        "c1c_variant_template",
+    expected_role = [
+        "zz_variant_template",
         "role-builder",
         "role-planner",
         "role-reviewer",
         "role-verifier",
     ]
+    assert [t.id for t in store.filter(category=PromptTemplateCategory.ROLE)] == expected_role
+    assert expected_role != sorted(expected_role)
     assert [t.id for t in store.filter(category=PromptTemplateCategory.STARTUP)] == ["startup-default"]
     assert [t.id for t in store.filter(category=PromptTemplateCategory.ASSISTANT_SAVED)] == [
         "c1b_regression_template"
@@ -243,14 +274,12 @@ def test_filter_by_role(tmp_path: Path):
     store.save(_make_template())
     store.save(_make_variant_template())
 
-    assert [t.id for t in store.filter(role=PromptRole.VERIFIER)] == [
-        "role-verifier",
-        "c1b_regression_template",
-    ]
-    assert [t.id for t in store.filter(role=PromptRole.BUILDER)] == [
-        "c1c_variant_template",
-        "role-builder",
-    ]
+    expected_verifier = ["role-verifier", "c1b_regression_template"]
+    assert [t.id for t in store.filter(role=PromptRole.VERIFIER)] == expected_verifier
+    assert expected_verifier != sorted(expected_verifier)
+    expected_builder = ["zz_variant_template", "role-builder"]
+    assert [t.id for t in store.filter(role=PromptRole.BUILDER)] == expected_builder
+    assert expected_builder != sorted(expected_builder)
     assert [t.id for t in store.filter(role=PromptRole.PLANNER)] == ["role-planner"]
 
 
@@ -258,7 +287,7 @@ def test_filter_by_variant(tmp_path: Path):
     store = PromptTemplateStore(root_dir=tmp_path)
     store.save(_make_variant_template())
 
-    assert [t.id for t in store.filter(variant="experimental")] == ["c1c_variant_template"]
+    assert [t.id for t in store.filter(variant="experimental")] == ["zz_variant_template"]
     default_variant = store.filter(variant="default")
     assert {t.id for t in default_variant} == DEFAULT_IDS
     assert [t.id for t in default_variant] == [t.id for t in sorted(default_variant, key=_sort_key)]
@@ -277,9 +306,11 @@ def test_filter_combined_category_and_role(tmp_path: Path):
         t.id
         for t in store.filter(category=PromptTemplateCategory.ASSISTANT_SAVED, role=PromptRole.VERIFIER)
     ] == ["c1b_regression_template"]
+    expected_builder = ["zz_variant_template", "role-builder"]
     assert [
         t.id for t in store.filter(category=PromptTemplateCategory.ROLE, role=PromptRole.BUILDER)
-    ] == ["c1c_variant_template", "role-builder"]
+    ] == expected_builder
+    assert expected_builder != sorted(expected_builder)
     assert [
         t.id
         for t in store.filter(
@@ -287,3 +318,43 @@ def test_filter_combined_category_and_role(tmp_path: Path):
         )
     ] == ["role-builder"]
     assert store.filter(category=PromptTemplateCategory.SAFETY, role=PromptRole.BUILDER) == []
+
+
+def test_equal_order_and_name_ties_broken_by_id(tmp_path: Path):
+    store = PromptTemplateStore(root_dir=tmp_path)
+    store.save(_tie_template("b-tie"))
+    store.save(_tie_template("a-tie"))
+    store.save(_tie_template("0-late", order=2))
+
+    expected_saved = ["a-tie", "b-tie", "0-late"]
+    assert expected_saved != sorted(expected_saved)
+    assert [
+        t.id for t in store.filter(category=PromptTemplateCategory.ASSISTANT_SAVED)
+    ] == expected_saved
+    assert [
+        t.id for t in store.by_category(PromptTemplateCategory.ASSISTANT_SAVED)
+    ] == expected_saved
+
+    expected_reviewer = ["a-tie", "b-tie", "0-late", "role-reviewer"]
+    assert expected_reviewer != sorted(expected_reviewer)
+    assert [t.id for t in store.by_role(PromptRole.REVIEWER)] == expected_reviewer
+    assert [t.id for t in store.filter(role=PromptRole.REVIEWER)] == expected_reviewer
+
+
+def test_id_tiebreak_independent_of_filename_order(tmp_path: Path):
+    store = PromptTemplateStore(root_dir=tmp_path)
+    (tmp_path / "f1.json").write_text(_tie_template("b-tie").model_dump_json(indent=2))
+    (tmp_path / "f2.json").write_text(_tie_template("a-tie").model_dump_json(indent=2))
+
+    listed = [t.id for t in store.list() if t.id in {"a-tie", "b-tie"}]
+    assert listed == ["b-tie", "a-tie"]
+
+    expected = ["a-tie", "b-tie"]
+    assert expected != listed
+    assert [
+        t.id for t in store.filter(category=PromptTemplateCategory.ASSISTANT_SAVED)
+    ] == expected
+    assert [
+        t.id for t in store.by_category(PromptTemplateCategory.ASSISTANT_SAVED)
+    ] == expected
+    assert [t.id for t in store.by_role(PromptRole.REVIEWER)] == ["a-tie", "b-tie", "role-reviewer"]
