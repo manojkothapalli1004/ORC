@@ -91,10 +91,10 @@ def _make_zz_role_template() -> PromptTemplate:
     )
 
 
-def _tie_template(template_id: str, order: int = 1) -> PromptTemplate:
+def _tie_template(template_id: str, order: int = 1, name: str = "Tie template") -> PromptTemplate:
     return PromptTemplate(
         id=template_id,
-        name="Tie template",
+        name=name,
         category=PromptTemplateCategory.ASSISTANT_SAVED,
         role=PromptRole.REVIEWER,
         body=f"Body for {template_id}.",
@@ -320,7 +320,7 @@ def test_filter_combined_category_and_role(tmp_path: Path):
     assert store.filter(category=PromptTemplateCategory.SAFETY, role=PromptRole.BUILDER) == []
 
 
-def test_equal_order_and_name_ties_broken_by_id(tmp_path: Path):
+def test_sort_applied_and_higher_order_placed_after_equal_order_entries(tmp_path: Path):
     store = PromptTemplateStore(root_dir=tmp_path)
     store.save(_tie_template("b-tie"))
     store.save(_tie_template("a-tie"))
@@ -339,6 +339,27 @@ def test_equal_order_and_name_ties_broken_by_id(tmp_path: Path):
     assert expected_reviewer != sorted(expected_reviewer)
     assert [t.id for t in store.by_role(PromptRole.REVIEWER)] == expected_reviewer
     assert [t.id for t in store.filter(role=PromptRole.REVIEWER)] == expected_reviewer
+
+
+def test_name_breaks_order_ties_before_id(tmp_path: Path):
+    store = PromptTemplateStore(root_dir=tmp_path)
+    store.save(_tie_template("a-x", name="Zed"))
+    store.save(_tie_template("b-x", name="Alpha"))
+
+    # Name order is opposite to id order, so a key of (order, id) would fail.
+    listed = [t.id for t in store.list() if t.id in {"a-x", "b-x"}]
+    assert listed == ["a-x", "b-x"]
+
+    expected = ["b-x", "a-x"]
+    assert expected != sorted(expected)
+    assert [
+        t.id for t in store.filter(category=PromptTemplateCategory.ASSISTANT_SAVED)
+    ] == expected
+    assert [
+        t.id for t in store.by_category(PromptTemplateCategory.ASSISTANT_SAVED)
+    ] == expected
+    assert [t.id for t in store.by_role(PromptRole.REVIEWER)] == ["b-x", "a-x", "role-reviewer"]
+    assert [t.id for t in store.filter(role=PromptRole.REVIEWER)] == ["b-x", "a-x", "role-reviewer"]
 
 
 def test_id_tiebreak_independent_of_filename_order(tmp_path: Path):
