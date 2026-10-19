@@ -312,6 +312,13 @@ class Scheduler:
             return None
 
     def _fire(self, job: ScheduledJob) -> ScheduledRun:
+        """Run ``job`` once and record the result.
+
+        A raising action is recorded as an ``error`` run. A storage failure
+        while loading the job, recording the run or updating the job's
+        last-run fields is logged and never escapes ``_fire``, so APScheduler
+        never sees an exception from a scheduled job.
+        """
         job_lock = self._job_lock(job.id)
         if not job_lock.acquire(blocking=False):
             output = f"job already running: {job.id}"
@@ -328,34 +335,43 @@ class Scheduler:
                 logger.warning("could not record skipped run for %s: %s", job.id, exc)
             return run
         try:
-            # Re-load latest definition in case it was updated since the trigger fired.
-            latest = self._store.get(job.id) or job
+            latest = job
             fired_at = datetime.now(timezone.utc)
             try:
+                # Re-load latest definition in case it was updated since the
+                # trigger fired. A failing load is recorded as an error run
+                # and the action is not dispatched.
+                latest = self._store.get(job.id) or job
                 output = self._dispatch_action(latest)
                 status = "ok"
             except Exception as exc:
                 output = f"{type(exc).__name__}: {exc}"
                 status = "error"
-                logger.warning("scheduled job %s failed: %s", latest.id, output)
+                logger.warning("scheduled job %s failed: %s", latest.id, output, exc_info=True)
             output = output if isinstance(output, str) else str(output)
             run = ScheduledRun(job_id=latest.id, fired_at=fired_at, status=status, output=output[:4000])
-            self._store.append_run(run)
+            try:
+                self._store.append_run(run)
+            except Exception as exc:
+                logger.warning("could not record run for %s: %s", latest.id, exc)
             latest.last_run_at = fired_at
             latest.last_status = status
             latest.last_output = output[:1000]
             # Persist only the run-result fields onto a fresh copy so that any
             # concurrent edit (disable, rename, ...) made during the run survives.
-            with self._lock:
-                fresh = self._store.get(latest.id)
-                if fresh is not None:
-                    fresh.last_run_at = latest.last_run_at
-                    fresh.last_status = latest.last_status
-                    fresh.last_output = latest.last_output
-                    try:
-                        self._store.update(fresh)
-                    except FileNotFoundError:
-                        pass
+            try:
+                with self._lock:
+                    fresh = self._store.get(latest.id)
+                    if fresh is not None:
+                        fresh.last_run_at = latest.last_run_at
+                        fresh.last_status = latest.last_status
+                        fresh.last_output = latest.last_output
+                        try:
+                            self._store.update(fresh)
+                        except FileNotFoundError:
+                            pass
+            except Exception as exc:
+                logger.warning("could not update last-run fields for %s: %s", latest.id, exc)
             return run
         finally:
             job_lock.release()

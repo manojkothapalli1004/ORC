@@ -12,7 +12,9 @@ in the trigger's timezone. Fixed datetimes only: no wall clock, no sleep.
 
 import ast
 import importlib
+import logging
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -328,3 +330,222 @@ def test_dow_error_names_item_as_written(dow):
     with pytest.raises(ValueError) as excinfo:
         _parse_cron()(f"0 9 * * {dow}")
     assert repr(dow) in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# Scheduler._fire: action and storage failures never escape the scheduler
+# ---------------------------------------------------------------------------
+
+SCHEDULER_LOGGER = "orchestrator.scheduler"
+
+
+class _InMemoryScheduleStore:
+    """In-memory stand-in for ScheduleStore with one-shot failure switches.
+
+    Mirrors ScheduleStore's method names (create/get/update/list/delete/
+    append_run/list_runs). list_runs is newest-first, like the real store.
+    Each ``fail_*_once`` switch makes the next call raise OSError('disk full')
+    and then resets itself.
+    """
+
+    def __init__(self):
+        self.jobs = {}
+        self.runs = []
+        self.fail_get_once = False
+        self.fail_append_once = False
+        self.fail_update_once = False
+
+    def _maybe_fail(self, flag):
+        if getattr(self, flag):
+            setattr(self, flag, False)
+            raise OSError("disk full")
+
+    def create(self, job):
+        self.jobs[job.id] = job.model_copy(deep=True)
+        return job.model_copy(deep=True)
+
+    def get(self, job_id):
+        self._maybe_fail("fail_get_once")
+        job = self.jobs.get(job_id)
+        return job.model_copy(deep=True) if job is not None else None
+
+    def update(self, job):
+        self._maybe_fail("fail_update_once")
+        if job.id not in self.jobs:
+            raise FileNotFoundError(job.id)
+        self.jobs[job.id] = job.model_copy(deep=True)
+        return job.model_copy(deep=True)
+
+    def list(self):
+        return [j.model_copy(deep=True) for j in self.jobs.values()]
+
+    def delete(self, job_id):
+        return self.jobs.pop(job_id, None) is not None
+
+    def append_run(self, run):
+        self._maybe_fail("fail_append_once")
+        self.runs.append(run)
+
+    def list_runs(self, job_id):
+        return [r for r in reversed(self.runs) if r.job_id == job_id]
+
+
+def _make_scheduler(store):
+    """Real Scheduler built without __init__ (no APScheduler, no disk).
+
+    Every attribute _fire/run_now/_job_lock touch is set explicitly.
+    """
+    scheduler_mod = importlib.import_module(SCHEDULER_MODULE)
+    sched = scheduler_mod.Scheduler.__new__(scheduler_mod.Scheduler)
+    sched._sched = None
+    sched._store = store
+    sched._prompts = None
+    sched._memory = None
+    sched._state = None
+    sched._lock = threading.Lock()
+    sched._started = False
+    sched._job_locks = {}
+    return sched
+
+
+def _raising_job(store, job_id="job-fire-1"):
+    """A fire_saved_prompt job with an empty payload: _dispatch_action raises ValueError."""
+    from backend.models.scheduler import ScheduledActionType, ScheduledJob
+
+    job = ScheduledJob(
+        id=job_id,
+        name="raises",
+        cron="* * * * *",
+        action_type=ScheduledActionType.FIRE_SAVED_PROMPT,
+        action_payload={},
+    )
+    return store.create(job)
+
+
+def _lock_is_free(sched, job_id):
+    lock = sched._job_lock(job_id)
+    acquired = lock.acquire(blocking=False)
+    if acquired:
+        lock.release()
+    return acquired
+
+
+def _warnings(caplog):
+    return [rec.getMessage() for rec in caplog.records if rec.name == SCHEDULER_LOGGER]
+
+
+@pytest.fixture
+def fire_env(caplog):
+    caplog.set_level(logging.WARNING, logger=SCHEDULER_LOGGER)
+    store = _InMemoryScheduleStore()
+    sched = _make_scheduler(store)
+    job = _raising_job(store)
+    return store, sched, job
+
+
+def test_raising_job_is_recorded_as_error_run(fire_env, caplog):
+    store, sched, job = fire_env
+    run = sched.run_now(job.id)
+    assert run is not None
+    assert run.status == "error"
+    assert run.output.startswith("ValueError: fire_saved_prompt requires action_payload.prompt_id")
+    assert [r.status for r in store.list_runs(job.id)] == ["error"]
+    assert store.get(job.id).last_status == "error"
+    assert store.get(job.id).last_output.startswith("ValueError:")
+    assert any("failed" in msg for msg in _warnings(caplog))
+    assert _lock_is_free(sched, job.id)
+
+
+def test_raising_job_releases_overlap_lock_and_next_run_succeeds(fire_env, monkeypatch):
+    store, sched, job = fire_env
+    first = sched.run_now(job.id)
+    assert first.status == "error"
+    assert _lock_is_free(sched, job.id)
+
+    monkeypatch.setattr(sched, "_dispatch_action", lambda latest: "done")
+    second = sched.run_now(job.id)
+    assert second.status == "ok"
+    assert second.output == "done"
+    # newest-first
+    assert [r.status for r in store.list_runs(job.id)] == ["ok", "error"]
+    assert store.get(job.id).last_status == "ok"
+    assert _lock_is_free(sched, job.id)
+
+
+def test_store_get_failure_becomes_error_run_without_dispatch(fire_env, monkeypatch, caplog):
+    store, sched, job = fire_env
+    calls = []
+    monkeypatch.setattr(sched, "_dispatch_action", lambda latest: calls.append(latest.id) or "done")
+    store.fail_get_once = True
+
+    # Call _fire directly (run_now would consume the one-shot get failure first).
+    run = sched._fire(job)
+
+    assert run.status == "error"
+    assert run.output.startswith("OSError: disk full")
+    assert calls == []
+    assert [r.status for r in store.list_runs(job.id)] == ["error"]
+    assert store.list_runs(job.id)[0].output.startswith("OSError: disk full")
+    assert store.get(job.id).last_status == "error"
+    assert any("failed" in msg and "OSError: disk full" in msg for msg in _warnings(caplog))
+    assert _lock_is_free(sched, job.id)
+
+
+def test_append_run_failure_does_not_propagate(fire_env, monkeypatch, caplog):
+    store, sched, job = fire_env
+    monkeypatch.setattr(sched, "_dispatch_action", lambda latest: "done")
+    store.fail_append_once = True
+
+    run = sched.run_now(job.id)
+
+    assert run is not None
+    assert run.status == "ok"
+    assert store.list_runs(job.id) == []
+    assert any("could not record run" in msg and "disk full" in msg for msg in _warnings(caplog))
+    assert store.get(job.id).last_status == "ok"
+    assert _lock_is_free(sched, job.id)
+
+    again = sched.run_now(job.id)
+    assert again.status == "ok"
+    assert [r.status for r in store.list_runs(job.id)] == ["ok"]
+
+
+def test_update_failure_does_not_propagate(fire_env, monkeypatch, caplog):
+    store, sched, job = fire_env
+    monkeypatch.setattr(sched, "_dispatch_action", lambda latest: "done")
+    store.fail_update_once = True
+
+    run = sched.run_now(job.id)
+
+    assert run is not None
+    assert run.status == "ok"
+    assert [r.status for r in store.list_runs(job.id)] == ["ok"]
+    assert any("could not update last-run fields" in msg and "disk full" in msg for msg in _warnings(caplog))
+    # The update never landed, so the stored job is untouched.
+    assert store.get(job.id).last_status is None
+    assert _lock_is_free(sched, job.id)
+
+    again = sched.run_now(job.id)
+    assert again.status == "ok"
+    assert store.get(job.id).last_status == "ok"
+
+
+def test_concurrent_fire_is_still_recorded_as_skipped(fire_env, monkeypatch, caplog):
+    store, sched, job = fire_env
+    calls = []
+    monkeypatch.setattr(sched, "_dispatch_action", lambda latest: calls.append(latest.id) or "done")
+
+    lock = sched._job_lock(job.id)
+    assert lock.acquire(blocking=False)
+    try:
+        run = sched._fire(job)
+    finally:
+        lock.release()
+
+    assert run.status == "error"
+    assert run.output == f"job already running: {job.id}"
+    assert calls == []
+    assert [r.output for r in store.list_runs(job.id)] == [f"job already running: {job.id}"]
+    assert store.get(job.id).last_status is None
+    assert any("skipped: already running" in msg for msg in _warnings(caplog))
+    assert _lock_is_free(sched, job.id)

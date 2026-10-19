@@ -19,6 +19,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - The `run_workflow_step` action advances a workflow through the configured LLM providers. It can make network calls when any provider is configured, including a router base URL with no key. A role using `claude_code_local` starts a local `claude` CLI process, which talks to Anthropic.
 - With no provider configured, `run_workflow_step` uses the mock provider, which makes no external API call.
 
+### Fixed
+- Scheduler: a failure while loading the job, recording the run or updating the job's last-run fields is logged and no longer escapes the scheduler; a job that raises was already recorded as an error run.
+
 ### Security
 - LAN auth hardening. When `LOCAL_NETWORK_ONLY` is on, requests from non-private, non-loopback addresses are rejected with 403. Loopback requests are allowed without credentials. Requests from other LAN devices require HTTP Basic Auth. If `LOCAL_ACCESS_PASSWORD` is unset, the console returns 503 to LAN clients instead of allowing them in. Credentials are compared in constant time.
 
