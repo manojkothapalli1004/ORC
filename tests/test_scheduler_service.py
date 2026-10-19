@@ -549,3 +549,83 @@ def test_concurrent_fire_is_still_recorded_as_skipped(fire_env, monkeypatch, cap
     assert store.get(job.id).last_status is None
     assert any("skipped: already running" in msg for msg in _warnings(caplog))
     assert _lock_is_free(sched, job.id)
+
+
+# ---------------------------------------------------------------------------
+# Real on-disk ScheduleStore: a guarded append_run failure leaves the schedule
+# record consistent and later runs still list newest-first.
+# ---------------------------------------------------------------------------
+
+
+def _real_schedule_store(tmp_path):
+    """The ScheduleStore the scheduler itself uses, rooted in a temp dir."""
+    scheduler_mod = importlib.import_module(SCHEDULER_MODULE)
+    cls = getattr(scheduler_mod, "ScheduleStore", None)
+    if cls is None:
+        cls = importlib.import_module("backend.storage.schedules").ScheduleStore
+    return cls(tmp_path)
+
+
+def test_real_store_append_run_failure_keeps_schedule_and_newest_first_order(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.WARNING, logger=SCHEDULER_LOGGER)
+    store = _real_schedule_store(tmp_path)
+    sched = _make_scheduler(store)
+    job = _raising_job(store, job_id="job-real-store-1")
+    job_id = job.id
+
+    outputs = iter(["first", "second", "third"])
+    monkeypatch.setattr(sched, "_dispatch_action", lambda latest: next(outputs))
+
+    original_append = store.append_run
+    failed = []
+
+    def flaky_append(run):
+        if not failed:
+            failed.append(run)
+            raise OSError("disk full")
+        return original_append(run)
+
+    monkeypatch.setattr(store, "append_run", flaky_append)
+
+    # 1) append_run raises once: _fire must not propagate and the job stays intact.
+    first = sched._fire(job)
+    assert first is not None
+    assert first.status == "ok"
+    assert first.output == "first"
+    assert len(failed) == 1
+    assert store.list_runs(job_id) == []
+    after = store.get(job_id)
+    assert after is not None
+    assert after.id == job_id
+    assert after.name == job.name
+    assert after.cron == job.cron
+    assert after.action_type == job.action_type
+    assert after.enabled == job.enabled
+    assert after.last_status == "ok"
+    assert after.last_output == "first"
+    assert after.last_run_at is not None
+    assert any("could not record run" in msg and "disk full" in msg for msg in _warnings(caplog))
+    assert _lock_is_free(sched, job_id)
+
+    # 2) Following successful runs are recorded and listed newest-first.
+    second = sched._fire(store.get(job_id))
+    assert second.status == "ok"
+    assert second.output == "second"
+    assert [r.output for r in store.list_runs(job_id)] == ["second"]
+
+    third = sched._fire(store.get(job_id))
+    assert third.status == "ok"
+    assert third.output == "third"
+
+    runs = store.list_runs(job_id)
+    assert [r.output for r in runs] == ["third", "second"]
+    assert all(r.job_id == job_id for r in runs)
+    assert all(r.status == "ok" for r in runs)
+    assert runs[0].fired_at >= runs[1].fired_at
+    assert "first" not in [r.output for r in runs]
+
+    final = store.get(job_id)
+    assert final.last_status == "ok"
+    assert final.last_output == "third"
+    assert final.cron == job.cron
+    assert _lock_is_free(sched, job_id)
