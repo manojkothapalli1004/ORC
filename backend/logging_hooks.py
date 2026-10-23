@@ -11,15 +11,81 @@ from backend.config import settings
 
 _SECRET_KEYS = {"api_key", "openai_api_key", "anthropic_api_key", "authorization", "token"}
 
+# Keys that look secret-ish by suffix/prefix but are plain counters and must stay visible.
+_SAFE_KEYS = frozenset(
+    {
+        "token_usage",
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "max_tokens",
+        "token_count",
+        "prompt_tokens",
+        "completion_tokens",
+    }
+)
+
+# Normalised (lowercase, separators stripped) names that are always secrets.
+_SECRET_COMPACT = frozenset(
+    {
+        "apikey",
+        "xapikey",
+        "openaiapikey",
+        "anthropicapikey",
+        "authorization",
+        "xauthorization",
+        "proxyauthorization",
+        "token",
+        "accesstoken",
+        "refreshtoken",
+        "bearertoken",
+        "idtoken",
+        "secret",
+        "clientsecret",
+        "password",
+        "passwd",
+        "credentials",
+    }
+)
+
+# Suffixes (after separator normalisation) that mark a key as a secret.
+# Plural counters like ``input_tokens`` end in ``_tokens``, not ``_token``, so they never match.
+_SECRET_SUFFIXES = ("_api_key", "_apikey", "_secret", "_password", "_token", "_authorization")
+
+_REDACTED = "***REDACTED***"
+
+
+def _is_secret_key(key: Any) -> bool:
+    """Return True if ``key`` names a credential that must never be logged.
+
+    Works on any key type (non-str keys are stringified) and tolerates the
+    common spelling variants: case, surrounding whitespace, ``-`` vs ``_``,
+    and a vendor/role prefix such as ``x-api-key`` or ``github_token``.
+    """
+    name = str(key).strip().lower().replace("-", "_").replace(" ", "_")
+    compact = name.replace("_", "")
+    if name in _SAFE_KEYS:
+        return False
+    if name in _SECRET_KEYS or compact in _SECRET_COMPACT:
+        return True
+    return name.endswith(_SECRET_SUFFIXES)
+
 
 def _sanitize(value: Any) -> Any:
+    """Return a copy of ``value`` with secret-keyed entries replaced by a marker.
+
+    Never mutates the input. Dict keys are preserved as the original objects.
+    A secret key whose value is itself a container is replaced whole.
+    """
     if isinstance(value, dict):
         return {
-            key: ("***REDACTED***" if key.lower() in _SECRET_KEYS else _sanitize(val))
+            key: (_REDACTED if _is_secret_key(key) else _sanitize(val))
             for key, val in value.items()
         }
     if isinstance(value, list):
         return [_sanitize(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize(item) for item in value)
     return value
 
 
