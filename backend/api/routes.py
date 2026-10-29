@@ -1091,7 +1091,7 @@ from backend.models.memory import (
     SavePromptRequest, UpdateHandoffStatusRequest, HandoffStatus, HANDOFF_STATUSES,
     MemoryUpdateRequest, MemoryUpdateResponse, MEMORY_SECTION_NAMES,
 )
-from backend.storage.memory import MemoryStore, ThreadStore
+from backend.storage.memory import MemoryStore, ThreadStore, MemoryLevelStore, render_memory_view
 from backend.services.assistant import AssistantService
 from backend.providers.claude_code_local_provider import (
     ClaudeCodeLocalAuthError,
@@ -1103,8 +1103,15 @@ thread_store = ThreadStore()
 assistant_svc = AssistantService()
 
 @router.get("/memory", response_model=ProjectMemory)
-async def get_project_memory():
-    return memory_store.load()
+async def get_project_memory(level: str = "full", since: str = ""):
+    memory = memory_store.load()
+    if level == "full" and not since:
+        return memory
+    try:
+        view = render_memory_view(memory, MemoryLevelStore(memory_store.memory_dir).load(), level=level, since=since)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return memory.model_copy(update=view)
 
 @router.put("/memory", response_model=ProjectMemory)
 async def update_project_memory(memory: ProjectMemory):

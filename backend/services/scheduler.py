@@ -17,6 +17,14 @@ Action types:
   process, which talks to Anthropic. With no provider configured it uses
   the mock provider, which makes no external API call. A step that leaves
   the workflow in ``error`` status is recorded as an ``error`` run.
+- ``summarize_memory_levels`` — generate L1 (3-5 bullets) and L2 (one
+  sentence) summaries beside canonical memory notes older than 7 / 30 days,
+  one call per note per level through the reviewer role's provider (network
+  when configured, including a router base URL with no key; a reviewer role
+  using ``claude_code_local`` starts a local ``claude`` CLI process per call;
+  the mock provider writes nothing). Bounded by ``action_payload.max_notes``
+  (default 50). A run with provider errors is recorded as an ``error`` run;
+  levels generated before the failure are kept.
 
 Each run is recorded with status ``ok`` or ``error``.
 
@@ -41,7 +49,8 @@ from apscheduler.triggers.cron import CronTrigger
 from backend.models.core import WorkflowStatus
 from backend.models.memory import MemoryUpdatePatch
 from backend.models.scheduler import ScheduledActionType, ScheduledJob, ScheduledRun
-from backend.storage.memory import MemoryStore
+from backend.services.memory_levels import generate_memory_levels
+from backend.storage.memory import MemoryLevelStore, MemoryStore
 from backend.storage.prompts import PromptTemplateStore
 from backend.storage.schedules import ScheduleStore
 from backend.storage.store import StateStore
@@ -418,6 +427,28 @@ class Scheduler:
             if state.status == WorkflowStatus.ERROR:
                 raise RuntimeError(f"workflow step failed: id={wf_id} error={state.error}")
             return f"workflow stepped: id={wf_id} status={state.status.value}"
+
+        if job.action_type == ScheduledActionType.SUMMARIZE_MEMORY_LEVELS:
+            max_notes = int(payload.get("max_notes", 50))
+            l1_after_days = int(payload.get("l1_after_days", 7))
+            l2_after_days = int(payload.get("l2_after_days", 30))
+            if max_notes < 1 or l1_after_days < 1 or l2_after_days <= l1_after_days:
+                raise ValueError(
+                    "summarize_memory_levels requires max_notes >= 1 and 1 <= l1_after_days < l2_after_days"
+                )
+            from backend.providers.registry import ProviderRegistry
+            provider = ProviderRegistry().get_provider("reviewer")
+            result = _run_coro(generate_memory_levels(
+                self._memory,
+                MemoryLevelStore(self._memory.memory_dir),
+                provider,
+                max_notes=max_notes,
+                l1_after_days=l1_after_days,
+                l2_after_days=l2_after_days,
+            ))
+            if result.errors:
+                raise RuntimeError(result.summary() + "; " + "; ".join(result.details[:5]))
+            return result.summary()
 
         raise ValueError(f"unknown action_type: {job.action_type}")
 

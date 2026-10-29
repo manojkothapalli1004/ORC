@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import uuid
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List
+from typing import Any, List
 
 from backend.config import settings
+from backend.storage.atomic import atomic_write_text
 from backend.models.memory import (
     ProjectMemory, AssistantThread, ThreadListItem,
     MemoryUpdatePatch, MEMORY_SECTION_NAMES,
@@ -282,3 +286,200 @@ class ThreadStore:
     def get_active_id(self) -> str:
         """Public accessor for the active thread ID."""
         return self._get_active_id()
+
+
+# ---------------------------------------------------------------------------
+# Derived memory levels (L1/L2) — read-side helpers and the sibling store.
+# Canonical text is never written by anything below this line.
+# ---------------------------------------------------------------------------
+
+NOTE_STAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+NOTE_HEADER_RE = re.compile(
+    r"^\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) · ([^\]\n]*)\]$",
+    re.MULTILINE,
+)
+MEMORY_LEVELS = ("full", "auto")
+LEVELS_FILE_NAME = "project_memory_levels.json"
+
+
+@dataclass(frozen=True)
+class MemoryNote:
+    """One dated block of a canonical memory section, as written by apply_patches."""
+
+    section: str
+    stamp: str
+    source: str
+    header: str
+    body: str
+
+    def key(self) -> str:
+        digest = hashlib.sha256(self.body.encode("utf-8")).hexdigest()[:16]
+        return f"{self.section}|{self.stamp}|{digest}"
+
+    def when(self) -> datetime:
+        return datetime.strptime(self.stamp, NOTE_STAMP_FORMAT).replace(tzinfo=timezone.utc)
+
+
+def _stamp_ok(stamp: str) -> bool:
+    try:
+        datetime.strptime(stamp, NOTE_STAMP_FORMAT)
+    except ValueError:
+        return False
+    return True
+
+
+def split_section_notes(section: str, body: str) -> tuple[str, list[MemoryNote]]:
+    """Split a section body into (undated preamble, dated notes). Pure; no I/O."""
+    body = body or ""
+    matches = [m for m in NOTE_HEADER_RE.finditer(body) if _stamp_ok(m.group(1))]
+    if not matches:
+        return body, []
+    preamble = body[: matches[0].start()].rstrip("\n")
+    notes: list[MemoryNote] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
+        note_body = body[match.end():end].strip("\n")
+        notes.append(
+            MemoryNote(
+                section=section,
+                stamp=match.group(1),
+                source=match.group(2),
+                header=match.group(0),
+                body=note_body,
+            )
+        )
+    return preamble, notes
+
+
+def render_section(preamble: str, blocks: list[str]) -> str:
+    parts = ([preamble] if preamble.strip() else []) + list(blocks)
+    return "\n\n".join(parts)
+
+
+class MemoryLevelStore:
+    """Derived L1/L2 texts stored beside the canonical memory file.
+
+    Holds derived text only; canonical text never goes in this file.
+    """
+
+    def __init__(self, memory_dir: Path | None = None) -> None:
+        self.memory_dir = memory_dir or settings.state_dir
+        self.levels_file = self.memory_dir / LEVELS_FILE_NAME
+        self.memory_dir.mkdir(parents=True, exist_ok=True)
+
+    def load(self) -> dict[str, dict[str, Any]]:
+        if not self.levels_file.exists():
+            return {}
+        try:
+            raw = json.loads(self.levels_file.read_text(encoding="utf-8"))
+            if isinstance(raw, dict) and isinstance(raw.get("notes"), dict):
+                return raw["notes"]
+            return {}
+        except (ValueError, TypeError, KeyError, OSError):
+            return {}
+
+    def save(self, records: dict[str, dict[str, Any]]) -> None:
+        atomic_write_text(
+            self.levels_file,
+            json.dumps({"version": 1, "notes": records}, indent=2, sort_keys=True, ensure_ascii=False),
+        )
+
+    @staticmethod
+    def level_text(records: dict[str, dict[str, Any]], key: str, level: str) -> str | None:
+        entry = records.get(key) if isinstance(records, dict) else None
+        if not isinstance(entry, dict):
+            return None
+        derived = entry.get(level)
+        if not isinstance(derived, dict):
+            return None
+        text = derived.get("text")
+        if isinstance(text, str) and text:
+            return text
+        return None
+
+
+def parse_since(since: str) -> datetime | None:
+    since = (since or "").strip()
+    if not since:
+        return None
+    try:
+        value = datetime.fromisoformat(since)
+    except ValueError as exc:
+        raise ValueError(f"invalid since value: {since!r}") from exc
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def pick_level(
+    age: timedelta,
+    records: dict[str, dict[str, Any]],
+    key: str,
+    *,
+    l1_after_days: int = 7,
+    l2_after_days: int = 30,
+) -> tuple[str, str | None]:
+    if age >= timedelta(days=l2_after_days):
+        text = MemoryLevelStore.level_text(records, key, "l2")
+        if text:
+            return "l2", text
+        text = MemoryLevelStore.level_text(records, key, "l1")
+        if text:
+            return "l1", text
+        return "l0", None
+    if age >= timedelta(days=l1_after_days):
+        text = MemoryLevelStore.level_text(records, key, "l1")
+        if text:
+            return "l1", text
+        return "l0", None
+    return "l0", None
+
+
+def render_memory_view(
+    memory: ProjectMemory,
+    records: dict[str, dict[str, Any]],
+    *,
+    level: str = "full",
+    since: str = "",
+    now: datetime | None = None,
+    l1_after_days: int = 7,
+    l2_after_days: int = 30,
+) -> dict[str, str]:
+    """Render every canonical section at the requested level / since filter.
+
+    The default path (level="full", no since) returns the stored text without
+    parsing. Headers are emitted verbatim; " (L1)" / " (L2)" follows the
+    closing bracket on the same line when a derived level is used.
+    """
+    if level not in MEMORY_LEVELS:
+        raise ValueError(f"invalid level: {level!r} (expected one of {MEMORY_LEVELS})")
+    since_dt = parse_since(since)
+    if level == "full" and since_dt is None:
+        return {name: getattr(memory, name, "") or "" for name in MEMORY_SECTION_NAMES}
+    now = now or datetime.now(timezone.utc)
+    out: dict[str, str] = {}
+    for name in MEMORY_SECTION_NAMES:
+        body = getattr(memory, name, "") or ""
+        preamble, notes = split_section_notes(name, body)
+        blocks: list[str] = []
+        for note in notes:
+            when = note.when()
+            if since_dt is not None and when < since_dt:
+                continue
+            if level == "full":
+                text, tag = note.body, ""
+            else:
+                chosen, derived = pick_level(
+                    now - when,
+                    records,
+                    note.key(),
+                    l1_after_days=l1_after_days,
+                    l2_after_days=l2_after_days,
+                )
+                if chosen == "l0":
+                    text, tag = note.body, ""
+                else:
+                    text, tag = derived, f" ({chosen.upper()})"
+            blocks.append(f"{note.header}{tag}\n{text}" if text else f"{note.header}{tag}")
+        out[name] = render_section(preamble, blocks)
+    return out

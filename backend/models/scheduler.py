@@ -21,12 +21,19 @@ class ScheduledActionType(str, Enum):
     when any provider is configured, including a router base URL with no key,
     and a role using ``claude_code_local`` starts a local ``claude`` CLI
     process, which talks to Anthropic. With no provider configured it uses the
-    mock provider.
+    mock provider. ``summarize_memory_levels`` generates derived L1/L2
+    summaries of canonical memory notes through the reviewer role's provider:
+    it makes network calls when that provider is configured (direct key or a
+    router base URL with no key), and a reviewer role using
+    ``claude_code_local`` starts a local ``claude`` CLI process for each call,
+    which talks to Anthropic; with no provider configured it uses the mock
+    provider and writes nothing.
     """
 
     FIRE_SAVED_PROMPT = "fire_saved_prompt"
     RECORD_MEMORY_NOTE = "record_memory_note"
     RUN_WORKFLOW_STEP = "run_workflow_step"
+    SUMMARIZE_MEMORY_LEVELS = "summarize_memory_levels"
 
 
 class ScheduledJob(BaseModel):

@@ -344,6 +344,7 @@ Read (safe, no state mutation):
 | `list_sessions` | All session summaries |
 | `get_session` | Single session with lifecycle |
 | `preview_prompt` | Handoff contract for an assigned session |
+| `get_canonical_memory` | Canonical memory by section; optional `level=auto` / `since=YYYY-MM-DD` |
 
 Write (bounded — idea/workflow creation only, no shell execution):
 | Tool | Purpose |
@@ -359,6 +360,40 @@ cd orchestrator
 uv run mcp dev backend/mcp_server.py
 ```
 This opens the MCP inspector UI where you can call each tool interactively.
+
+### Memory levels job
+
+Canonical memory is append-only. The `summarize_memory_levels` scheduled action generates derived L1 (3-5 bullets) and L2 (one sentence) summaries beside each dated note older than 7 / 30 days and stores them in `data/project_memory_levels.json`. The canonical file `data/project_memory.json` is never written by this job. Summaries are generated through the reviewer role's provider; with no provider configured the mock provider is used and nothing is written. Create ONE such job.
+
+1. Create the daily job:
+
+```bash
+curl -s -X POST http://localhost:8100/api/scheduler/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "memory levels (daily)", "cron": "30 3 * * *", "action_type": "summarize_memory_levels", "action_payload": {"max_notes": 50, "l1_after_days": 7, "l2_after_days": 30}}'
+```
+
+2. Run it once now (use the `id` from the response):
+
+```bash
+curl -s -X POST http://localhost:8100/api/scheduler/jobs/<id>/run-now
+```
+
+The run output reads `memory levels: generated=N errors=N mock=N pending=N`. A run with provider errors is recorded as `error`; levels generated before the failure are kept, and the next run continues where it stopped.
+
+3. Read the compact view (the default `GET /api/memory` is unchanged):
+
+```bash
+curl -s 'http://localhost:8100/api/memory?level=auto'
+curl -s 'http://localhost:8100/api/memory?since=2026-10-01'
+```
+
+4. Roll back: delete the job and remove the derived file. Nothing in the canonical file needs restoring.
+
+```bash
+curl -s -X DELETE http://localhost:8100/api/scheduler/jobs/<id>
+rm /path/to/orchestrator/data/project_memory_levels.json
+```
 
 ## Useful endpoints reference
 

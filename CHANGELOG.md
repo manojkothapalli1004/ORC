@@ -11,6 +11,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   - `fire_saved_prompt`: renders a saved prompt template's body and records it in the job's run log, as a manual hand-off cue.
   - `record_memory_note`: appends a dated note to a canonical memory section through `MemoryStore.apply_patches`.
   - `run_workflow_step`: advances the named workflow by one step through the workflow engine.
+  - `summarize_memory_levels`: generates derived L1 (3-5 bullets) and L2 (one sentence) summaries beside canonical memory notes older than 7 / 30 days, bounded by `max_notes` per run (default 50), idempotent by note content hash; stored in `data/project_memory_levels.json`, never inside the canonical text.
+- Memory read views: `GET /api/memory` and the MCP `get_canonical_memory` tool accept optional `level` (`full` default, `auto`) and `since` (ISO date) parameters; the default call is unchanged.
 - Each scheduled run is recorded in a per-job run log. A job's `last_status` is `ok` or `error`.
 - Full-text search index: a SQLite FTS5 index over workflows and other local records. On startup, if the index is empty, it is rebuilt from the JSON files under `data/`.
 
@@ -18,6 +20,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - No scheduled action runs a shell command.
 - The `run_workflow_step` action advances a workflow through the configured LLM providers. It can make network calls when any provider is configured, including a router base URL with no key. A role using `claude_code_local` starts a local `claude` CLI process, which talks to Anthropic.
 - With no provider configured, `run_workflow_step` uses the mock provider, which makes no external API call.
+- The `summarize_memory_levels` action calls the reviewer role's provider once per note per level: network when that provider is configured, including a router base URL with no key; a reviewer role using `claude_code_local` starts a local `claude` CLI process for each call, which talks to Anthropic; with no provider configured it uses the mock provider, which makes no external API call and writes nothing.
 
 ### Fixed
 - Scheduler: a failure while loading the job, recording the run or updating the job's last-run fields is logged and no longer escapes the scheduler; a job that raises was already recorded as an error run.

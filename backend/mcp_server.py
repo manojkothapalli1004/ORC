@@ -18,7 +18,7 @@ Tools exposed:
       list_sessions            — all session summaries
       get_session              — single session detail with lifecycle
       preview_prompt           — read-only prompt contract for an assigned session
-      get_canonical_memory     — structured project memory by section
+      get_canonical_memory     — structured project memory by section (optional level/since)
       list_saved_prompts       — operator-saved prompts with metadata and filters
       get_saved_prompt         — single saved prompt (body + metadata)
       list_linkable_objects    — workflows / ideas / sessions a prompt can link to
@@ -46,7 +46,7 @@ from backend.models.prompt import PromptTemplate, PromptTemplateCategory
 from backend.models.session import SessionStatus
 from backend.storage import BuilderJobStore, IdeaStore, PromptTemplateStore, SessionStore, StateStore
 from backend.storage.builder_jobs import bridge_summary_from_jobs
-from backend.storage.memory import MemoryStore
+from backend.storage.memory import MemoryLevelStore, MemoryStore, render_memory_view
 
 # ---------------------------------------------------------------------------
 # Stores (module-level singletons — same pattern as routes.py)
@@ -58,6 +58,7 @@ _session_store = SessionStore()
 _idea_store = IdeaStore()
 _prompt_store = PromptTemplateStore()
 _memory_store = MemoryStore()
+_level_store = MemoryLevelStore()
 
 # ---------------------------------------------------------------------------
 # Server
@@ -423,17 +424,28 @@ def convert_idea(idea_id: str, approval_mode: str = "auto_with_limits") -> dict[
 
 
 @mcp.tool()
-def get_canonical_memory() -> dict[str, Any]:
+def get_canonical_memory(level: str = "full", since: str = "") -> dict[str, Any]:
     """Return structured canonical project memory, keyed by section name.
 
     Sections: vision, systems, status, decisions, preferences, known_failures, roadmap.
     Equivalent to GET /api/memory.
+
+    Args:
+        level: "full" (default; today's complete text) or "auto" (notes younger than 7 days verbatim,
+               7-30 days as their L1 key-point bullets, older as their L2 one-liner; a note whose derived
+               level is not generated yet is returned verbatim). Headers "[<ts> · <source>]" are kept.
+        since: optional ISO date/datetime (UTC when naive); only notes stamped at or after it are returned.
+               Undated preamble text is always returned.
     """
     memory = _memory_store.load()
-    return {
-        "sections": {name: getattr(memory, name, "") or "" for name in MEMORY_SECTION_NAMES},
-        "updated_at": memory.updated_at.isoformat(),
-    }
+    if level == "full" and not since:
+        sections = {name: getattr(memory, name, "") or "" for name in MEMORY_SECTION_NAMES}
+    else:
+        try:
+            sections = render_memory_view(memory, _level_store.load(), level=level, since=since)
+        except ValueError as exc:
+            return {"error": str(exc)}
+    return {"sections": sections, "updated_at": memory.updated_at.isoformat()}
 
 
 @mcp.tool()
