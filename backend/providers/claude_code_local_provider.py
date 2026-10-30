@@ -3,6 +3,11 @@
 Experimental, local-only, session/machine-dependent.
 Requires `claude` CLI installed and authenticated (Claude Pro/Max/Code subscription).
 Does NOT require ANTHROPIC_API_KEY.
+
+Note on CLI flags: `--bare` is NOT used because it skips the keychain OAuth
+login (the CLI then answers "Not logged in" under launchd); hooks and plugins
+are skipped with an empty setting-sources list plus disableAllHooks instead
+(verified 2026-10-29 with Claude Code 2.1.302).
 """
 
 from __future__ import annotations
@@ -67,10 +72,14 @@ class ClaudeCodeLocalProvider:
             raise RuntimeError("claude CLI not found in PATH")
 
         model = request.model or self._default_model
+        # No `--bare`: it skips the keychain OAuth login and the CLI answers
+        # "Not logged in" when ORC runs as a launchd service. Hooks/plugins
+        # are skipped via empty setting-sources + disableAllHooks instead.
         args = [
             self._cli_path,
             "-p",
-            "--bare",
+            "--setting-sources", "",
+            "--settings", '{"disableAllHooks": true}',
             "--no-session-persistence",
             "--output-format", "json",
             "--model", model,

@@ -24,6 +24,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Fixed
 - Scheduler: a failure while loading the job, recording the run or updating the job's last-run fields is logged and no longer escapes the scheduler; a job that raises was already recorded as an error run.
+- claude_code_local provider: no longer passes `--bare`, which bypassed the keychain OAuth login and made every role answer 'Not logged in' when ORC ran as a launchd service; hooks and plugins are now disabled with `--setting-sources ''` and `--settings '{"disableAllHooks": true}'`.
 
 ### Security
 - LAN auth hardening. When `LOCAL_NETWORK_ONLY` is on, requests from non-private, non-loopback addresses are rejected with 403. Loopback requests are allowed without credentials. Requests from other LAN devices require HTTP Basic Auth. If `LOCAL_ACCESS_PASSWORD` is unset, the console returns 503 to LAN clients instead of allowing them in. Credentials are compared in constant time.
